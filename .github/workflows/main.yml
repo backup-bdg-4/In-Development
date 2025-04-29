@@ -1,0 +1,47 @@
+name: Download and Store BERT Model with Git LFS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  download-and-store:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout the repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true # Enable Git LFS during checkout
+
+      # Install Git LFS
+      - name: Install Git LFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      # Download the file from Dropbox
+      - name: Download BERT Model
+        run: |
+          curl -L "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=yy86dres&dl=1" -o BERTSQUADFP16.mlmodel
+
+      # Track the file with Git LFS
+      - name: Track Model with Git LFS
+        run: |
+          git lfs track "*.mlmodel"
+          git add .gitattributes
+          git add BERTSQUADFP16.mlmodel
+
+      # Commit and push changes
+      - name: Commit and Push
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git commit -m "Add BERTSQUADFP16.mlmodel via Git LFS" || echo "No changes to commit"
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
