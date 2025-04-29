@@ -126,22 +126,76 @@ export const chatService = {
     }
   },
   
-  // Check if the backend is available
+  // Check if the backend is available and model is loaded
   checkHealth: async () => {
     try {
       const response = await api.get('/');
       console.log('Health check response:', response.data);
       
-      // Check if model is loaded
-      if (!response.data.model_loaded) {
-        console.warn('Model is not loaded on the backend');
-        return false;
+      // Save the health check response for diagnostics
+      const healthStatus = {
+        isHealthy: response.data.status === 'healthy',
+        modelLoaded: response.data.model?.loaded === true,
+        modelExists: response.data.model?.file_exists === true,
+        errorMessage: response.data.model?.error || null,
+        lastAttempt: response.data.model?.last_attempt || null,
+        modelDetails: response.data.model?.details || null,
+        timestamp: response.data.timestamp
+      };
+      
+      // Log detailed diagnostics
+      if (!healthStatus.isHealthy) {
+        console.warn('Backend reports degraded status');
       }
       
-      return response.data.status === 'healthy';
+      if (!healthStatus.modelLoaded) {
+        console.warn('Model is not loaded on the backend');
+        if (healthStatus.errorMessage) {
+          console.error('Model load error:', healthStatus.errorMessage);
+        }
+      }
+      
+      // Store health status for reference
+      window.backdoorAIStatus = healthStatus;
+      
+      return healthStatus.modelLoaded && healthStatus.isHealthy;
     } catch (error) {
       console.error('Backend health check failed:', error);
+      
+      // Store error status
+      window.backdoorAIStatus = {
+        isHealthy: false,
+        modelLoaded: false,
+        connectionError: error.message || 'Connection to backend failed',
+        timestamp: new Date().toISOString()
+      };
+      
       return false;
+    }
+  },
+  
+  // Get detailed health status
+  getHealthStatus: async () => {
+    // If we already have status info, return it
+    if (window.backdoorAIStatus) {
+      return window.backdoorAIStatus;
+    }
+    
+    // Otherwise fetch it fresh
+    try {
+      await chatService.checkHealth();
+      return window.backdoorAIStatus || {
+        isHealthy: false,
+        modelLoaded: false,
+        errorMessage: 'Failed to retrieve health status'
+      };
+    } catch (error) {
+      console.error('Failed to get health status:', error);
+      return {
+        isHealthy: false,
+        modelLoaded: false,
+        errorMessage: 'Error checking health status: ' + error.message
+      };
     }
   },
   
