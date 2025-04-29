@@ -41,51 +41,211 @@ else:
 # Global variable to store the loaded model
 model = None
 
-# Function to load the model
-def load_model():
-    global model
+# Model status tracking
+model_status = {
+    "loaded": False,
+    "path": MODEL_PATH,
+    "exists": False,
+    "last_error": None,
+    "load_attempts": 0,
+    "last_attempt_time": None,
+    "details": {}
+}
+
+def load_model(force_reload=False):
+    """
+    Load the CoreML model for inference.
     
-    # Check if model exists, if not try to download it
-    if not os.path.exists(MODEL_PATH):
+    Args:
+        force_reload (bool): If True, reload the model even if it's already loaded
+        
+    Returns:
+        bool: True if model loaded successfully, False otherwise
+    """
+    global model, model_status
+    
+    # Track attempt
+    model_status["load_attempts"] += 1
+    model_status["last_attempt_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # If model is already loaded and no force reload, return True
+    if model is not None and not force_reload:
+        logger.info("Model already loaded, skipping load")
+        return True
+    
+    # Check if model file exists
+    model_status["exists"] = os.path.exists(MODEL_PATH)
+    
+    # If model doesn't exist, try to download it
+    if not model_status["exists"]:
         logger.warning(f"Model not found at {MODEL_PATH}. Attempting to download...")
+        
         # Add the parent directory to sys.path to import download_model
         parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if parent_dir not in sys.path:
             sys.path.append(parent_dir)
         
         try:
+            # Import the download_model function
             from download_model import download_model
+            
+            # Try to download the model
+            logger.info("Starting model download...")
             if not download_model():
-                logger.error("Failed to download model")
+                error_msg = "Failed to download model"
+                logger.error(error_msg)
+                model_status["last_error"] = error_msg
                 return False
-            else:
-                # Try loading the model after download
-                try:
-                    logger.info(f"Loading model from {MODEL_PATH}")
-                    model = ct.models.MLModel(MODEL_PATH)
-                    logger.info("Model loaded successfully")
-                    return True
-                except Exception as e:
-                    logger.error(f"Error loading model after download: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    return False
-        except ImportError:
-            logger.error("Could not import download_model module")
+            
+            # Update model existence status after download
+            model_status["exists"] = os.path.exists(MODEL_PATH)
+            if not model_status["exists"]:
+                error_msg = "Model download reported success but file doesn't exist"
+                logger.error(error_msg)
+                model_status["last_error"] = error_msg
+                return False
+                
+            logger.info("Model downloaded successfully, now loading...")
+        
+        except ImportError as e:
+            error_msg = f"Could not import download_model module: {str(e)}"
+            logger.error(error_msg)
+            model_status["last_error"] = error_msg
             return False
-    else:
-        # Load the ML model
-        try:
-            logger.info(f"Loading model from {MODEL_PATH}")
-            model = ct.models.MLModel(MODEL_PATH)
-            logger.info("Model loaded successfully")
-            return True
+        
         except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
+            error_msg = f"Unexpected error during model download: {str(e)}"
+            logger.error(error_msg)
             logger.error(traceback.format_exc())
+            model_status["last_error"] = error_msg
             return False
+    
+    # Load the ML model
+    try:
+        # Clear any previous model from memory
+        if model is not None:
+            model = None
+        
+        logger.info(f"Loading model from {MODEL_PATH}")
+        
+        # Try importing coremltools if not already imported
+        try:
+            import coremltools as ct
+        except ImportError as e:
+            error_msg = f"Failed to import coremltools: {str(e)}"
+            logger.error(error_msg)
+            model_status["last_error"] = error_msg
+            return False
+        
+        # Load the model
+        start_time = time.time()
+        model = ct.models.MLModel(MODEL_PATH)
+        load_time = time.time() - start_time
+        
+        # Get model details
+        spec = model.get_spec()
+        
+        # Store model metadata
+        model_status["details"] = {
+            "description": spec.description.metadata.shortDescription if hasattr(spec.description.metadata, "shortDescription") else "Unknown",
+            "author": spec.description.metadata.author if hasattr(spec.description.metadata, "author") else "Unknown",
+            "load_time_sec": load_time,
+            "inputs": [input_desc.name for input_desc in spec.description.input],
+            "outputs": [output_desc.name for output_desc in spec.description.output]
+        }
+        
+        logger.info(f"Model loaded successfully in {load_time:.2f} seconds")
+        logger.info(f"Model description: {model_status['details']['description']}")
+        logger.info(f"Model inputs: {model_status['details']['inputs']}")
+        logger.info(f"Model outputs: {model_status['details']['outputs']}")
+        
+        # Test model with a simple prediction
+        test_success = _test_model_basic_prediction()
+        if not test_success:
+            error_msg = "Model loaded but failed basic prediction test"
+            logger.error(error_msg)
+            model_status["last_error"] = error_msg
+            model_status["loaded"] = False
+            return False
+        
+        # Update status
+        model_status["loaded"] = True
+        model_status["last_error"] = None
+        return True
+    
+    except Exception as e:
+        error_msg = f"Error loading model: {str(e)}"
+        logger.error(error_msg)
+        logger.error(traceback.format_exc())
+        model_status["last_error"] = error_msg
+        model_status["loaded"] = False
+        return False
+
+def _test_model_basic_prediction():
+    """
+    Test the model with a basic prediction to ensure it's working correctly.
+    
+    Returns:
+        bool: True if prediction succeeds, False otherwise
+    """
+    global model
+    
+    if model is None:
+        logger.error("Cannot test model - model not loaded")
+        return False
+    
+    try:
+        # Create a simple test input
+        test_input = {
+            'query_text': 'What is AI?',
+            'passage_text': 'Artificial Intelligence (AI) is the simulation of human intelligence processes by machines.'
+        }
+        
+        # Try a prediction
+        logger.info("Testing model with basic prediction")
+        prediction = model.predict(test_input)
+        
+        # Check if prediction has expected format
+        if isinstance(prediction, dict) and prediction:
+            logger.info("Basic model prediction successful")
+            return True
+        else:
+            logger.error(f"Unexpected prediction format: {type(prediction)}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error during model test prediction: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
 
 # Load the model on startup
 model_loaded = load_model()
+
+# Schedule periodic model checks
+def schedule_model_checks():
+    """Schedule periodic checks to ensure model is loaded"""
+    import threading
+    
+    def check_model():
+        global model, model_loaded, model_status
+        
+        # If model is not loaded, try to reload it
+        if model is None or not model_status["loaded"]:
+            logger.info("Scheduled check: Attempting to reload model")
+            model_loaded = load_model()
+        
+        # Schedule the next check
+        check_timer = threading.Timer(300, check_model)  # Check every 5 minutes
+        check_timer.daemon = True
+        check_timer.start()
+    
+    # Start the first check
+    initial_timer = threading.Timer(60, check_model)  # First check after 1 minute
+    initial_timer.daemon = True
+    initial_timer.start()
+
+# Start the scheduled checks
+schedule_model_checks()
 
 # Define request and response models
 class QueryRequest(BaseModel):
@@ -106,19 +266,41 @@ class ChatSession(BaseModel):
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
-    global model, model_loaded
+    """
+    Health check endpoint with detailed model status information.
+    This provides diagnostics that help the frontend understand
+    the status of the model and what might be wrong.
+    """
+    global model, model_loaded, model_status
     
     # Try to reload the model if it's not loaded
-    if model is None and not model_loaded:
+    if model is None and not model_status["loaded"] and not model_loaded:
+        logger.info("Model not loaded, attempting to load in health check")
         model_loaded = load_model()
     
-    model_status = {
-        "model_loaded": model is not None,
-        "model_path": MODEL_PATH,
-        "model_exists": os.path.exists(MODEL_PATH)
+    # Prepare status response
+    response = {
+        "status": "healthy" if model_status["loaded"] else "degraded",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "model": {
+            "loaded": model_status["loaded"],
+            "file_exists": os.path.exists(MODEL_PATH),
+            "path": MODEL_PATH,
+            "load_attempts": model_status["load_attempts"],
+            "last_attempt": model_status["last_attempt_time"],
+        },
+        "api_version": "1.0.0"
     }
-    return {"status": "healthy", **model_status}
+    
+    # If we have an error, include it
+    if model_status["last_error"]:
+        response["model"]["error"] = model_status["last_error"]
+    
+    # Include model details if available
+    if model_status["details"]:
+        response["model"]["details"] = model_status["details"]
+    
+    return response
 
 @app.post("/api/query", response_model=Dict[str, Any])
 async def process_query(request: QueryRequest):
@@ -290,52 +472,139 @@ async def search_web(query: str) -> str:
         return "Error occurred while searching the web."
 
 def extract_answer(prediction: Dict[str, Any], context: str) -> str:
-    """Extract the answer from the model prediction"""
+    """
+    Extract the answer from the model prediction.
+    
+    This function handles different output formats from the model:
+    1. start_span/end_span indices for extractive QA
+    2. Direct answer text fields
+    3. Probability/confidence distributions for answer candidates
+    
+    Args:
+        prediction: The model's prediction output
+        context: The context text used for the question
+    
+    Returns:
+        str: The extracted answer or appropriate fallback message
+    """
     try:
+        # Log the raw prediction type and structure
         logger.info(f"Raw prediction type: {type(prediction)}")
         
-        # If prediction is a numpy array, convert to Python types
+        # Create a normalized copy of the prediction for processing
+        normalized_pred = {}
+        
+        # Convert numpy arrays to Python types for better handling
         if hasattr(prediction, 'tolist'):
+            # If prediction is itself a numpy array
             prediction = prediction.tolist()
+        elif isinstance(prediction, dict):
+            # If prediction contains numpy arrays as values
+            for key, value in prediction.items():
+                if hasattr(value, 'tolist'):
+                    normalized_pred[key] = value.tolist()
+                else:
+                    normalized_pred[key] = value
         
-        # Log the prediction for debugging
-        logger.info(f"Processed prediction: {json.dumps(prediction, default=str)}")
+        # Log the normalized prediction
+        logger.info(f"Normalized prediction: {json.dumps(normalized_pred, default=str)}")
         
-        # Check if the prediction contains start and end indices
+        # APPROACH 1: Handle extractive QA output format (start_span/end_span)
+        # This is the expected format for many BERT-based QA models
         if isinstance(prediction, dict) and 'start_span' in prediction and 'end_span' in prediction:
-            # Handle array or single value
-            start_idx = prediction['start_span'][0] if isinstance(prediction['start_span'], list) else prediction['start_span']
-            end_idx = prediction['end_span'][0] if isinstance(prediction['end_span'], list) else prediction['end_span']
-            
-            # Convert to integers if they're numpy values or floats
-            start_idx = int(start_idx)
-            end_idx = int(end_idx)
-            
-            logger.info(f"Extracted indices: start={start_idx}, end={end_idx}")
-            
-            # Validate indices
-            if start_idx >= 0 and end_idx >= start_idx and end_idx < len(context):
-                answer = context[start_idx:end_idx+1].strip()
-                logger.info(f"Extracted answer: {answer}")
-                return answer
-            else:
-                logger.warning(f"Invalid indices: start={start_idx}, end={end_idx}, context_length={len(context)}")
+            try:
+                # Handle array or single value
+                start_idx = prediction['start_span'][0] if isinstance(prediction['start_span'], (list, tuple)) else prediction['start_span']
+                end_idx = prediction['end_span'][0] if isinstance(prediction['end_span'], (list, tuple)) else prediction['end_span']
+                
+                # Convert to integers if they're numpy values or floats
+                start_idx = int(float(start_idx))
+                end_idx = int(float(end_idx))
+                
+                logger.info(f"Extracted indices: start={start_idx}, end={end_idx}, context_length={len(context)}")
+                
+                # Validate indices
+                if 0 <= start_idx < len(context) and start_idx <= end_idx < len(context):
+                    answer = context[start_idx:end_idx+1].strip()
+                    logger.info(f"Successfully extracted answer using span indices: '{answer}'")
+                    
+                    # Return the answer if it's not empty
+                    if answer:
+                        return answer
+                else:
+                    logger.warning(f"Invalid indices: start={start_idx}, end={end_idx}, context_length={len(context)}")
+            except (ValueError, TypeError, IndexError) as e:
+                logger.warning(f"Error processing start/end spans: {str(e)}")
         
-        # If we can't extract a specific answer from the prediction format
-        # Try to find any relevant information in the prediction
+        # APPROACH 2: Look for direct answer fields in the output
         if isinstance(prediction, dict):
-            # Look for any field that might contain the answer
-            for key in ['answer', 'text', 'response', 'output']:
-                if key in prediction and isinstance(prediction[key], str):
-                    return prediction[key]
+            # Common field names for answers in different models
+            answer_field_names = ['answer', 'text', 'response', 'output', 'answer_text', 'prediction']
+            
+            for field in answer_field_names:
+                if field in prediction and isinstance(prediction[field], str) and prediction[field].strip():
+                    logger.info(f"Found answer in '{field}' field: '{prediction[field]}'")
+                    return prediction[field].strip()
         
-        # Fallback: Generate a generic response based on the query
-        return "Based on the information provided, I don't have a specific answer. Please try rephrasing your question."
+        # APPROACH 3: If we have a logits/probabilities output, find the most likely answer
+        if isinstance(prediction, dict) and ('logits' in prediction or 'probabilities' in prediction or 'scores' in prediction):
+            # For models that return probability distributions
+            # This would need more specific implementation based on the model's output format
+            logger.info("Model returned probability distribution, but specific handling is not implemented")
+        
+        # APPROACH 4: If prediction is a string itself (rare but possible)
+        if isinstance(prediction, str) and prediction.strip():
+            logger.info(f"Prediction is a string: '{prediction}'")
+            return prediction.strip()
+        
+        # APPROACH 5: Use maximum probability token from start and end indices
+        if 'start_span_probs' in prediction and 'end_span_probs' in prediction:
+            try:
+                # Try to find highest probability span
+                start_probs = prediction['start_span_probs']
+                end_probs = prediction['end_span_probs']
+                
+                # Get the top 3 most likely start and end positions
+                start_indices = sorted(range(len(start_probs)), key=lambda i: -start_probs[i])[:3]
+                end_indices = sorted(range(len(end_probs)), key=lambda i: -end_probs[i])[:3]
+                
+                # Try different combinations
+                for start_idx in start_indices:
+                    for end_idx in end_indices:
+                        if start_idx <= end_idx and end_idx < len(context):
+                            answer = context[start_idx:end_idx+1].strip()
+                            if answer and len(answer) > 2:  # Minimum answer length
+                                logger.info(f"Extracted answer from probabilities: '{answer}'")
+                                return answer
+            except Exception as e:
+                logger.warning(f"Error extracting answer from probabilities: {str(e)}")
+        
+        # FALLBACK: Generate a response based on the context
+        if context and len(context) > 20:
+            # Try to provide a meaningful response from the context
+            # Use the first 100-150 characters as a generic response
+            context_start = context[:150].strip()
+            if len(context) > 150:
+                context_start += "..."
+                
+            logger.info(f"Using context beginning as fallback: '{context_start}'")
+            return f"Based on the information provided: {context_start}"
+            
+        # Final fallback
+        logger.warning("Could not extract a good answer from model prediction")
+        return "I'm unable to provide a specific answer based on the available information. Please try rephrasing your question."
     
     except Exception as e:
         logger.error(f"Error extracting answer: {str(e)}")
         logger.error(traceback.format_exc())
-        return "I encountered an error while processing your question. Please try again."
+        
+        # Log detailed error diagnostics
+        logger.error(f"Prediction type: {type(prediction)}")
+        logger.error(f"Context length: {len(context)}")
+        if isinstance(prediction, dict):
+            logger.error(f"Prediction keys: {list(prediction.keys())}")
+        
+        return "I encountered an error while processing your question. Please try again with a different phrasing."
 
 def determine_intent(query: str) -> str:
     """Determine the intent of the user's query"""
