@@ -40,6 +40,20 @@ except ImportError:
     JUPYTER_MODEL_SERVER_AVAILABLE = False
     logging.warning("Jupyter model server not available, falling back to standard model loading")
 
+# Import Remote model server (for offloading model to external service)
+try:
+    from .utils.remote_model_server import (
+        initialize_remote_model_server,
+        predict_with_remote_server,
+        predict_with_remote_server_async,
+        check_remote_server_health,
+        is_remote_server_available
+    )
+    REMOTE_MODEL_SERVER_AVAILABLE = True
+except ImportError:
+    REMOTE_MODEL_SERVER_AVAILABLE = False
+    logging.warning("Remote model server not available, falling back to Jupyter model server")
+
 # Configure logging based on settings
 logging_level = getattr(logging, settings.logging.level.upper(), logging.INFO)
 logging.basicConfig(
@@ -137,7 +151,71 @@ async def startup_event():
     if use_jupyter_env and not JUPYTER_MODEL_SERVER_AVAILABLE:
         logger.warning("USE_JUPYTER_MODEL_SERVER is set but Jupyter is not available. Falling back to standard model loading.")
     
-    if use_jupyter:
+    # Check if we should use Remote model server
+    use_remote_env = os.environ.get('USE_REMOTE_MODEL_SERVER') == 'true'
+    use_remote = use_remote_env and REMOTE_MODEL_SERVER_AVAILABLE
+    app.state.use_remote_server = use_remote
+    
+    if use_remote_env and not REMOTE_MODEL_SERVER_AVAILABLE:
+        logger.warning("USE_REMOTE_MODEL_SERVER is set but Remote model server is not available. Falling back to Jupyter model server.")
+    
+    # Initialize the appropriate model server
+    if use_remote:
+        logger.info("Using Remote model server for offloading model to external service")
+        
+        # Initialize Remote model server in a background thread
+        import threading
+        
+        def init_remote_server_thread():
+            try:
+                logger.info("Initializing Remote model server connection")
+                success = initialize_remote_model_server()
+                if success:
+                    logger.info("Remote model server connection initialized successfully")
+                    app.state.remote_server_ready = True
+                else:
+                    logger.error("Failed to initialize Remote model server connection")
+                    app.state.remote_server_ready = False
+            except Exception as e:
+                logger.error(f"Error initializing Remote model server connection: {str(e)}")
+                app.state.remote_server_ready = False
+        
+        # Start initialization in a background thread
+        remote_thread = threading.Thread(target=init_remote_server_thread)
+        remote_thread.daemon = True
+        remote_thread.start()
+        logger.info("Started background thread for Remote model server initialization")
+        
+        # Start periodic checks for Remote server status
+        app.state.remote_check_interval = 30  # seconds
+        
+        def check_remote_server_status():
+            """Check if Remote server is available and reconnect if needed."""
+            try:
+                if not is_remote_server_available():
+                    logger.warning("Remote model server not available, attempting to reconnect")
+                    success = initialize_remote_model_server()
+                    if success:
+                        logger.info("Remote model server connection reestablished successfully")
+                        app.state.remote_server_ready = True
+                    else:
+                        logger.error("Failed to reconnect to Remote model server")
+                        app.state.remote_server_ready = False
+            except Exception as e:
+                logger.error(f"Error checking Remote server status: {str(e)}")
+        
+        # Schedule periodic checks
+        import threading
+        
+        def schedule_remote_checks():
+            check_remote_server_status()
+            threading.Timer(app.state.remote_check_interval, schedule_remote_checks).start()
+        
+        # Start the periodic checks
+        threading.Timer(app.state.remote_check_interval, schedule_remote_checks).start()
+        logger.info("Started periodic checks for Remote model server")
+        
+    elif use_jupyter:
         logger.info("Using Jupyter model server for memory-efficient model loading")
         
         # Initialize Jupyter model server in a background thread
@@ -227,6 +305,20 @@ async def shutdown_event():
     else:
         # Clear any global resources
         logger.info("No Jupyter server to shut down")
+    
+    # Check if we're using Remote model server
+    if getattr(app.state, 'use_remote_server', False):
+        try:
+            logger.info("Shutting down Remote model server connection")
+            success = shutdown_remote_model_server()
+            if success:
+                logger.info("Remote model server connection shut down successfully")
+            else:
+                logger.error("Failed to shut down Remote model server connection")
+        except Exception as e:
+            logger.error(f"Error shutting down Remote model server connection: {str(e)}")
+    else:
+        logger.info("No Remote model server to shut down")
     
     # Force garbage collection to free memory
     try:
@@ -501,6 +593,7 @@ async def process_query(request: QueryRequest, request_obj: Request):
                     'end_index': prediction_result.get('end_index', 0),
                     'confidence': prediction_result.get('confidence', 0.0)
                 }
+        
         except asyncio.TimeoutError:
             logger.error(f"Model prediction timed out after {settings.model.predict_timeout_seconds} seconds")
             raise HTTPException(
