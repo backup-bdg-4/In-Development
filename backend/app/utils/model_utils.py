@@ -142,6 +142,7 @@ def find_model_file(model_name: str = "BERTSQUADFP16.mlmodel") -> Tuple[bool, st
 def validate_model(model_path: str) -> Tuple[bool, Dict[str, Any]]:
     """
     Validate that the model is a valid CoreML model.
+    Memory-efficient version that avoids loading the full model in memory-saving mode.
     
     Args:
         model_path: Path to the model file
@@ -151,8 +152,34 @@ def validate_model(model_path: str) -> Tuple[bool, Dict[str, Any]]:
     """
     try:
         start_time = time.time()
+        minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
         
-        # Try to load the model
+        # Check if file exists and has reasonable size
+        if not os.path.exists(model_path):
+            return False, {"error": f"Model file not found at {model_path}"}
+        
+        file_size_mb = os.path.getsize(model_path) / (1024 * 1024)
+        
+        # In memory-saving mode, just check file existence and size
+        if minimize_memory:
+            logger.info(f"Memory-saving mode: Skipping full model validation for {model_path}")
+            logger.info(f"File exists with size: {file_size_mb:.2f} MB")
+            
+            # Basic validation - check file size is reasonable (> 100MB for BERT model)
+            if file_size_mb < 100:
+                logger.warning(f"Model file size ({file_size_mb:.2f} MB) seems too small for a BERT model")
+                
+            model_details = {
+                "description": "Validation skipped in memory-saving mode",
+                "author": "Unknown",
+                "load_time_sec": time.time() - start_time,
+                "size_mb": file_size_mb,
+                "validation_skipped": True
+            }
+            
+            return True, model_details
+        
+        # Standard validation - load the model
         logger.info(f"Validating model at {model_path}")
         model = ct.models.MLModel(model_path)
         load_time = time.time() - start_time
@@ -165,10 +192,14 @@ def validate_model(model_path: str) -> Tuple[bool, Dict[str, Any]]:
             "description": spec.description.metadata.shortDescription if hasattr(spec.description.metadata, "shortDescription") else "Unknown",
             "author": spec.description.metadata.author if hasattr(spec.description.metadata, "author") else "Unknown",
             "load_time_sec": load_time,
-            "size_mb": os.path.getsize(model_path) / (1024 * 1024),
+            "size_mb": file_size_mb,
         }
         
         logger.info(f"Model validation successful: {model_details['description']}")
+        
+        # Clear model from memory
+        model = None
+        
         return True, model_details
     
     except Exception as e:
@@ -179,7 +210,7 @@ def validate_model(model_path: str) -> Tuple[bool, Dict[str, Any]]:
 def ensure_model_availability(model_name: str = "BERTSQUADFP16.mlmodel") -> Dict[str, Any]:
     """
     Ensure the model is available in at least one location.
-    Attempts to copy between locations if needed, with special handling for Render.com.
+    Memory-efficient version that minimizes copies for Render Free Tier.
     
     Args:
         model_name: Name of the model file
@@ -190,6 +221,7 @@ def ensure_model_availability(model_name: str = "BERTSQUADFP16.mlmodel") -> Dict
     # Track starting time for performance monitoring
     start_time = time.time()
     running_on_render = os.environ.get('RUNNING_ON_RENDER') == 'true'
+    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
     
     # 1. Find if model exists somewhere
     found, model_path = find_model_file(model_name)
@@ -244,119 +276,168 @@ def ensure_model_availability(model_name: str = "BERTSQUADFP16.mlmodel") -> Dict
             "search_time_sec": time.time() - start_time
         }
     
-    # 3. Copy to other directories for redundancy
+    # 3. Copy to other directories for redundancy - but only if not in memory-saving mode
     copied_locations = []
     copy_errors = []
     
-    # Define target directories to copy to
-    target_dirs = []
-    
-    # Add MODEL_DATA_PATH if defined
-    model_data_path = os.environ.get('MODEL_DATA_PATH')
-    if model_data_path:
+    # If we're on Render Free Tier or memory-saving mode is enabled,
+    # only ensure the model is in /tmp/model and skip other copies
+    if running_on_render or minimize_memory:
+        logger.info("Running in memory-saving mode - minimizing model copies")
+        
+        # Only ensure the model is in /tmp/model
+        tmp_model_dir = "/tmp/model"
         try:
-            os.makedirs(model_data_path, exist_ok=True)
-            target_dirs.append(model_data_path)
-        except Exception as e:
-            copy_errors.append(f"Failed to create MODEL_DATA_PATH directory {model_data_path}: {str(e)}")
-    
-    # Add Render.com specific paths if running on Render
-    if running_on_render:
-        render_paths = [
-            "/opt/render/project/src/backend/app/model",  # Persistent disk path
-            "/opt/render/project/src/backend",           # Backend directory
-        ]
-        for path in render_paths:
-            try:
-                os.makedirs(path, exist_ok=True)
-                target_dirs.append(path)
-            except Exception as e:
-                copy_errors.append(f"Failed to create Render directory {path}: {str(e)}")
-    
-    # Add /tmp/model directory
-    tmp_model_dir = "/tmp/model"
-    try:
-        os.makedirs(tmp_model_dir, exist_ok=True)
-        target_dirs.append(tmp_model_dir)
-    except Exception as e:
-        copy_errors.append(f"Failed to create temp directory {tmp_model_dir}: {str(e)}")
-    
-    # Add app/model directory
-    app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    app_model_dir = os.path.join(app_dir, "model")
-    try:
-        os.makedirs(app_model_dir, exist_ok=True)
-        target_dirs.append(app_model_dir)
-    except Exception as e:
-        copy_errors.append(f"Failed to create app model directory {app_model_dir}: {str(e)}")
-    
-    # Add Docker paths
-    docker_paths = [
-        "/app/app/model", 
-        "/app/backend/app/model"
-    ]
-    for docker_path in docker_paths:
-        try:
-            os.makedirs(docker_path, exist_ok=True)
-            target_dirs.append(docker_path)
-        except:
-            # Might not be in Docker or permissions issue
-            pass
-    
-    # Add current directory and backend/app/model for local development
-    try:
-        cwd = os.getcwd()
-        local_dirs = [
-            os.path.join(cwd, "backend", "app", "model"),
-            os.path.join(cwd, "app", "model")
-        ]
-        for local_dir in local_dirs:
-            try:
-                os.makedirs(local_dir, exist_ok=True)
-                target_dirs.append(local_dir)
-            except Exception as e:
-                copy_errors.append(f"Failed to create local directory {local_dir}: {str(e)}")
-    except Exception as e:
-        copy_errors.append(f"Error setting up local directories: {str(e)}")
-    
-    # Remove duplicates while preserving order
-    target_dirs = list(dict.fromkeys(target_dirs))
-    
-    logger.info(f"Copying model to {len(target_dirs)} target directories for redundancy")
-    
-    # Copy the model to all target directories
-    for target_dir in target_dirs:
-        target_path = os.path.join(target_dir, model_name)
-        if os.path.abspath(target_path) != os.path.abspath(model_path):
-            try:
-                # Check if target file already exists and has the same size
-                if os.path.exists(target_path):
+            os.makedirs(tmp_model_dir, exist_ok=True)
+            tmp_model_path = os.path.join(tmp_model_dir, model_name)
+            
+            # Only copy if needed and not already in /tmp/model
+            if os.path.abspath(tmp_model_path) != os.path.abspath(model_path):
+                if os.path.exists(tmp_model_path):
+                    # Check if sizes match
                     source_size = os.path.getsize(model_path)
-                    target_size = os.path.getsize(target_path)
+                    target_size = os.path.getsize(tmp_model_path)
                     
                     if source_size == target_size:
-                        logger.info(f"Model already exists at {target_path} with matching size ({source_size} bytes)")
-                        copied_locations.append(target_path)
-                        continue
+                        logger.info(f"Model already exists at {tmp_model_path} with matching size")
+                        copied_locations.append(tmp_model_path)
                     else:
-                        logger.warning(f"Size mismatch for existing model at {target_path}: {source_size} vs {target_size} bytes")
-                
-                # Copy the file
-                logger.info(f"Copying model from {model_path} to {target_path}")
-                shutil.copy2(model_path, target_path)
-                
-                # Verify the copy succeeded
-                if os.path.exists(target_path):
-                    logger.info(f"✅ Successfully copied model to {target_path}")
-                    copied_locations.append(target_path)
+                        # Only copy if sizes don't match
+                        logger.info(f"Copying model to {tmp_model_path} (size mismatch)")
+                        shutil.copy2(model_path, tmp_model_path)
+                        copied_locations.append(tmp_model_path)
                 else:
-                    error_msg = f"Copy operation didn't fail but file doesn't exist at {target_path}"
+                    # Copy if doesn't exist
+                    logger.info(f"Copying model to {tmp_model_path}")
+                    shutil.copy2(model_path, tmp_model_path)
+                    copied_locations.append(tmp_model_path)
+            else:
+                # Model is already in /tmp/model
+                logger.info(f"Model already in primary location {tmp_model_path}")
+                copied_locations.append(tmp_model_path)
+                
+            # Set MODEL_DATA_PATH to /tmp/model
+            os.environ["MODEL_DATA_PATH"] = "/tmp/model"
+            
+            # If the model is not in /tmp/model, update the model_path
+            if os.path.abspath(model_path) != os.path.abspath(tmp_model_path) and os.path.exists(tmp_model_path):
+                model_path = tmp_model_path
+                logger.info(f"Updated primary model path to {model_path}")
+        except Exception as e:
+            error_msg = f"Failed to ensure model in /tmp/model: {str(e)}"
+            logger.warning(error_msg)
+            copy_errors.append(error_msg)
+    else:
+        # Standard behavior for non-Render environments - copy to multiple locations
+        # Define target directories to copy to
+        target_dirs = []
+        
+        # Add MODEL_DATA_PATH if defined
+        model_data_path = os.environ.get('MODEL_DATA_PATH')
+        if model_data_path:
+            try:
+                os.makedirs(model_data_path, exist_ok=True)
+                target_dirs.append(model_data_path)
+            except Exception as e:
+                copy_errors.append(f"Failed to create MODEL_DATA_PATH directory {model_data_path}: {str(e)}")
+        
+        # Add Render.com specific paths if running on Render
+        if running_on_render:
+            render_paths = [
+                "/opt/render/project/src/backend/app/model",  # Persistent disk path
+                "/opt/render/project/src/backend",           # Backend directory
+            ]
+            for path in render_paths:
+                try:
+                    os.makedirs(path, exist_ok=True)
+                    target_dirs.append(path)
+                except Exception as e:
+                    copy_errors.append(f"Failed to create Render directory {path}: {str(e)}")
+        
+        # Add /tmp/model directory
+        tmp_model_dir = "/tmp/model"
+        try:
+            os.makedirs(tmp_model_dir, exist_ok=True)
+            target_dirs.append(tmp_model_dir)
+        except Exception as e:
+            copy_errors.append(f"Failed to create temp directory {tmp_model_dir}: {str(e)}")
+        
+        # Add app/model directory
+        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        app_model_dir = os.path.join(app_dir, "model")
+        try:
+            os.makedirs(app_model_dir, exist_ok=True)
+            target_dirs.append(app_model_dir)
+        except Exception as e:
+            copy_errors.append(f"Failed to create app model directory {app_model_dir}: {str(e)}")
+        
+        # Add Docker paths
+        docker_paths = [
+            "/app/app/model", 
+            "/app/backend/app/model"
+        ]
+        for docker_path in docker_paths:
+            try:
+                os.makedirs(docker_path, exist_ok=True)
+                target_dirs.append(docker_path)
+            except:
+                # Might not be in Docker or permissions issue
+                pass
+        
+        # Add current directory and backend/app/model for local development
+        try:
+            cwd = os.getcwd()
+            local_dirs = [
+                os.path.join(cwd, "backend", "app", "model"),
+                os.path.join(cwd, "app", "model")
+            ]
+            for local_dir in local_dirs:
+                try:
+                    os.makedirs(local_dir, exist_ok=True)
+                    target_dirs.append(local_dir)
+                except Exception as e:
+                    copy_errors.append(f"Failed to create local directory {local_dir}: {str(e)}")
+        except Exception as e:
+            copy_errors.append(f"Error setting up local directories: {str(e)}")
+        
+        # Remove duplicates while preserving order
+        target_dirs = list(dict.fromkeys(target_dirs))
+        
+        logger.info(f"Copying model to {len(target_dirs)} target directories for redundancy")
+        
+        # Copy the model to all target directories
+        for target_dir in target_dirs:
+            target_path = os.path.join(target_dir, model_name)
+            if os.path.abspath(target_path) != os.path.abspath(model_path):
+                try:
+                    # Check if target file already exists and has the same size
+                    if os.path.exists(target_path):
+                        source_size = os.path.getsize(model_path)
+                        target_size = os.path.getsize(target_path)
+                        
+                        if source_size == target_size:
+                            logger.info(f"Model already exists at {target_path} with matching size ({source_size} bytes)")
+                            copied_locations.append(target_path)
+                            continue
+                        else:
+                            logger.warning(f"Size mismatch for existing model at {target_path}: {source_size} vs {target_size} bytes")
+                    
+                    # Copy the file
+                    logger.info(f"Copying model from {model_path} to {target_path}")
+                    shutil.copy2(model_path, target_path)
+                    
+                    # Verify the copy succeeded
+                    if os.path.exists(target_path):
+                        logger.info(f"✅ Successfully copied model to {target_path}")
+                        copied_locations.append(target_path)
+                    else:
+                        error_msg = f"Copy operation didn't fail but file doesn't exist at {target_path}"
+                        logger.warning(error_msg)
+                        copy_errors.append(error_msg)
+                except Exception as e:
+                    error_msg = f"Failed to copy model to {target_path}: {str(e)}"
                     logger.warning(error_msg)
                     copy_errors.append(error_msg)
-            except Exception as e:
-                error_msg = f"Failed to copy model to {target_path}: {str(e)}"
-                logger.warning(error_msg)
-                copy_errors.append(error_msg)
     
     # Calculate total process time
     process_time = time.time() - start_time
@@ -379,5 +460,6 @@ def ensure_model_availability(model_name: str = "BERTSQUADFP16.mlmodel") -> Dict
         "details": details,
         "copy_errors": copy_errors if copy_errors else None,
         "directory_listings": directory_listings,
-        "process_time_sec": process_time
+        "process_time_sec": process_time,
+        "memory_saving_mode": running_on_render or minimize_memory
     }
