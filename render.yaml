@@ -11,47 +11,27 @@ services:
       # Create only the essential model directory for memory efficiency
       mkdir -p /tmp/model
       
-      # Enable memory-saving mode with Jupyter model server
+      # Enable memory-saving mode with external model server
       export MINIMIZE_MEMORY_USAGE=true
-      export MODEL_DATA_PATH=/tmp/model
-      export USE_JUPYTER_MODEL_SERVER=true
-      
-      # Check for model file in repository - only copy to /tmp/model
-      echo "Searching for model file in repository..."
-      if [ -f "BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Found model in repository root"
-        cp BERTSQUADFP16.mlmodel /tmp/model/
-      elif [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Found model in backend directory"
-        cp backend/BERTSQUADFP16.mlmodel /tmp/model/
-      elif [ -f "backend/app/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Found model in backend/app/model directory"
-        cp backend/app/model/BERTSQUADFP16.mlmodel /tmp/model/
-      else
-        echo "⚠️ Model not found in repository, attempting to download directly to /tmp/model"
-        # Direct download attempt - download directly to /tmp/model
-        curl -L "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=ho9dyrm6&dl=1" -o /tmp/model/BERTSQUADFP16.mlmodel
-      fi
-      
-      # Verify the model exists
-      if [ -f "/tmp/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Model successfully stored in /tmp/model"
-        echo "Model size: $(du -h /tmp/model/BERTSQUADFP16.mlmodel | cut -f1)"
-      else
-        echo "⚠️ WARNING: Failed to obtain model file"
-        exit 1
-      fi
+      export USE_EXTERNAL_MODEL_SERVER=true
       
       echo "===== BUILD COMPLETE ====="
     startCommand: |
       echo "===== STARTING APPLICATION (Free Tier) ====="
-      # Ensure model path is set correctly
-      export MODEL_DATA_PATH=/tmp/model
-      echo "MODEL_DATA_PATH set to $MODEL_DATA_PATH"
       
-      # Enable Jupyter model server for memory efficiency
-      export USE_JUPYTER_MODEL_SERVER=true
-      echo "Jupyter model server enabled for memory efficiency"
+      # Enable external model server for memory efficiency
+      export USE_EXTERNAL_MODEL_SERVER=true
+      export MODEL_SERVER_URL=http://localhost:5000
+      echo "External model server enabled for memory efficiency"
+      
+      # Start the model server in the background
+      echo "Starting model server..."
+      python backend/model_server.py &
+      MODEL_SERVER_PID=$!
+      
+      # Wait for model server to start
+      echo "Waiting for model server to start..."
+      sleep 5
       
       # Start the application
       cd backend
@@ -62,23 +42,18 @@ services:
         value: production
       - key: LOG_LEVEL
         value: info
-      # Use /tmp/model for Free Tier compatibility
-      - key: MODEL_DATA_PATH
-        value: /tmp/model
-      - key: BACKDOOR_MODEL_SEARCH_PATHS
-        value: "/tmp/model,/app/app/model,/app/backend/app/model,/app/backend,/app"
       # Flag to indicate we're running on Render
       - key: RUNNING_ON_RENDER
         value: "true"
-      # Enable memory-saving mode to avoid redundant model copies
+      # Enable memory-saving mode
       - key: MINIMIZE_MEMORY_USAGE
         value: "true"
-      # Enable Jupyter model server for memory efficiency
-      - key: USE_JUPYTER_MODEL_SERVER
+      # Enable external model server for memory efficiency
+      - key: USE_EXTERNAL_MODEL_SERVER
         value: "true"
-      # Disable model download timeout for initial load
-      - key: MODEL_LOAD_TIMEOUT
-        value: "120"
+      # Set model server URL
+      - key: MODEL_SERVER_URL
+        value: "http://localhost:5000"
     healthCheckPath: /
 
   # Frontend service

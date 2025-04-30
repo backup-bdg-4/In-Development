@@ -40,6 +40,20 @@ except ImportError:
     JUPYTER_MODEL_SERVER_AVAILABLE = False
     logging.warning("Jupyter model server not available, falling back to standard model loading")
 
+# Import external model server (for memory-efficient model loading)
+try:
+    from .utils.external_model_server import (
+        initialize_model_server, 
+        predict_with_external_server, 
+        predict_with_external_server_async,
+        shutdown_model_server,
+        is_model_server_running
+    )
+    EXTERNAL_MODEL_SERVER_AVAILABLE = True
+except ImportError:
+    EXTERNAL_MODEL_SERVER_AVAILABLE = False
+    logging.warning("External model server not available, falling back to standard model loading")
+
 # Configure logging based on settings
 logging_level = getattr(logging, settings.logging.level.upper(), logging.INFO)
 logging.basicConfig(
@@ -212,6 +226,85 @@ async def startup_event():
         
         logger.warning("Standard model loading is disabled. Please use Jupyter model server.")
 
+    # Check if we should use external model server
+    use_external_env = os.environ.get('USE_EXTERNAL_MODEL_SERVER') == 'true'
+    use_external = (memory_saving_mode or use_external_env) and EXTERNAL_MODEL_SERVER_AVAILABLE
+    app.state.use_external_server = use_external
+    
+    if use_external_env and not EXTERNAL_MODEL_SERVER_AVAILABLE:
+        logger.warning("USE_EXTERNAL_MODEL_SERVER is set but external server is not available. Falling back to standard model loading.")
+    
+    if use_external:
+        logger.info("Using external model server for memory-efficient model loading")
+        
+        # Initialize external model server in a background thread
+        import threading
+        
+        def init_external_server_thread():
+            try:
+                logger.info("Initializing external model server")
+                success = initialize_model_server()
+                if success:
+                    logger.info("External model server initialized successfully")
+                    app.state.external_server_ready = True
+                else:
+                    logger.error("Failed to initialize external model server")
+                    app.state.external_server_ready = False
+            except Exception as e:
+                logger.error(f"Error initializing external model server: {str(e)}")
+                app.state.external_server_ready = False
+        
+        # Start initialization in a background thread
+        external_thread = threading.Thread(target=init_external_server_thread)
+        external_thread.daemon = True
+        external_thread.start()
+        logger.info("Started background thread for external model server initialization")
+        
+        # Start periodic checks for external server status
+        app.state.external_check_interval = 30  # seconds
+        
+        def check_external_server_status():
+            """Check if external server is running and restart if needed."""
+            try:
+                if not is_model_server_running():
+                    logger.warning("External model server not running, attempting to initialize")
+                    success = initialize_model_server()
+                    if success:
+                        logger.info("External model server reconnected successfully")
+                        app.state.external_server_ready = True
+                    else:
+                        logger.error("Failed to reconnect to external model server")
+                        app.state.external_server_ready = False
+            except Exception as e:
+                logger.error(f"Error checking external server status: {str(e)}")
+        
+        # Schedule periodic checks
+        import threading
+        
+        def schedule_external_checks():
+            check_external_server_status()
+            threading.Timer(app.state.external_check_interval, schedule_external_checks).start()
+        
+        # Start the periodic checks
+        threading.Timer(app.state.external_check_interval, schedule_external_checks).start()
+        logger.info("Started periodic checks for external model server")
+        
+        # Force garbage collection to free memory
+        try:
+            gc.collect()
+            logger.info("Memory-saving mode: Garbage collection performed")
+        except Exception as e:
+            logger.warning(f"Failed to perform garbage collection: {e}")
+    else:
+        # Force garbage collection to free memory
+        try:
+            gc.collect()
+            logger.info("Memory-saving mode: Garbage collection performed")
+        except Exception as e:
+            logger.warning(f"Failed to perform garbage collection: {e}")
+        
+        logger.warning("Standard model loading is disabled. Please use external model server.")
+
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info(f"Shutting down {settings.app_name}")
@@ -227,6 +320,18 @@ async def shutdown_event():
     else:
         # Clear any global resources
         logger.info("No Jupyter server to shut down")
+    
+    # Check if we're using external model server
+    if getattr(app.state, 'use_external_server', False):
+        try:
+            logger.info("Shutting down external model server")
+            shutdown_model_server()
+            logger.info("External model server shut down successfully")
+        except Exception as e:
+            logger.error(f"Error shutting down external model server: {str(e)}")
+    else:
+        # Clear any global resources
+        logger.info("No external server to shut down")
     
     # Force garbage collection to free memory
     try:
