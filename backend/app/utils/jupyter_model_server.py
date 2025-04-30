@@ -417,6 +417,30 @@ def predict_with_jupyter(query: str, context: str) -> Dict[str, Any]:
         logger.error(f"Error making prediction with Jupyter: {str(e)}")
         return {"error": f"Prediction error: {str(e)}"}
 
+async def predict_with_jupyter_server(model_input: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Make a prediction using the Jupyter-hosted model with async support.
+    
+    Args:
+        model_input: Dictionary with query_text and passage_text
+        
+    Returns:
+        Dictionary with prediction result
+    """
+    global MODEL_SERVER_READY
+    
+    if not MODEL_SERVER_READY:
+        logger.error("Model server not ready")
+        return {"error": "Model server not ready"}
+    
+    # Extract query and context from model_input
+    query = model_input.get('query_text', '')
+    context = model_input.get('passage_text', '')
+    
+    # Use the synchronous function for now
+    # In a real implementation, this would make an async HTTP request to the Jupyter server
+    return predict_with_jupyter(query, context)
+
 def shutdown_jupyter_server():
     """Shutdown the Jupyter server."""
     global JUPYTER_SERVER_PROCESS, MODEL_SERVER_READY
