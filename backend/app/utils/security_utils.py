@@ -12,8 +12,6 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from secure import SecureHeaders
-
 from ..config import settings
 
 # Configure logging
@@ -22,20 +20,102 @@ logger = logging.getLogger(__name__)
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address)
 
+# Define security headers
+class SecureHeaders:
+    """Class to manage security headers for HTTP responses."""
+    
+    def __init__(self, 
+                 server=False,
+                 hsts=True,
+                 xfo="DENY",
+                 xxp="1; mode=block",
+                 content="nosniff",
+                 referrer="strict-origin-when-cross-origin",
+                 permissions_policy=None,
+                 cache_control="no-store,max-age=0"):
+        """
+        Initialize security headers with sensible defaults.
+        
+        Args:
+            server: Whether to expose server info
+            hsts: Whether to enable HTTP Strict Transport Security
+            xfo: X-Frame-Options value
+            xxp: X-XSS-Protection value
+            content: X-Content-Type-Options value
+            referrer: Referrer-Policy value
+            permissions_policy: Permissions Policy settings
+            cache_control: Cache-Control value
+        """
+        self.headers = {}
+        
+        # Don't expose server info
+        if not server:
+            self.headers["Server"] = ""
+            
+        # HTTP Strict Transport Security
+        if hsts:
+            self.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+            
+        # X-Frame-Options
+        if xfo:
+            self.headers["X-Frame-Options"] = xfo
+            
+        # X-XSS-Protection
+        if xxp:
+            self.headers["X-XSS-Protection"] = xxp
+            
+        # X-Content-Type-Options
+        if content:
+            self.headers["X-Content-Type-Options"] = content
+            
+        # Referrer-Policy
+        if referrer:
+            self.headers["Referrer-Policy"] = referrer
+            
+        # Permissions-Policy (formerly Feature-Policy)
+        if permissions_policy:
+            policy_parts = []
+            for feature, origins in permissions_policy.items():
+                if origins is None:
+                    policy_parts.append(f"{feature}=()")
+                else:
+                    policy_parts.append(f"{feature}={origins}")
+            
+            if policy_parts:
+                self.headers["Permissions-Policy"] = ", ".join(policy_parts)
+                
+        # Cache-Control
+        if cache_control:
+            self.headers["Cache-Control"] = cache_control
+    
+    def apply(self, response):
+        """
+        Apply security headers to a response.
+        
+        Args:
+            response: The FastAPI response object
+        
+        Returns:
+            The response with security headers applied
+        """
+        for header, value in self.headers.items():
+            response.headers[header] = value
+        return response
+
 # Initialize secure headers
 secure_headers = SecureHeaders(
-    server=False,  # Don't expose server info
-    hsts=True,     # HTTP Strict Transport Security
-    xfo="DENY",    # X-Frame-Options: DENY
-    xxp="1; mode=block",  # X-XSS-Protection
-    content="nosniff",    # X-Content-Type-Options
-    referrer="strict-origin-when-cross-origin", # Referrer Policy
-    permissions_policy={  # Permissions Policy (formerly Feature Policy)
+    server=False,
+    hsts=True,
+    xfo="DENY",
+    xxp="1; mode=block",
+    content="nosniff",
+    referrer="strict-origin-when-cross-origin",
+    permissions_policy={
         "camera": None,
         "microphone": None,
         "geolocation": None,
     },
-    cache_control="no-store,max-age=0"  # Cache Control
+    cache_control="no-store,max-age=0"
 )
 
 class QueryBlocklist:
