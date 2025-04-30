@@ -76,12 +76,57 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Failed to load NLTK resources: {e}")
     
+    # Initialize the application with enhanced setup
+    try:
+        from .utils.initialization import initialize_app
+        init_result = initialize_app()
+        
+        logger.info(f"Application initialized in {init_result['initialization_time_sec']:.2f} seconds")
+        logger.info(f"Environment: {init_result['environment']['environment']}")
+        
+        if init_result['model']['found']:
+            logger.info(f"✅ Model found at {init_result['model']['path']} ({init_result['model']['size_mb']:.2f} MB)")
+        else:
+            logger.error(f"❌ Model not found during initialization")
+            
+        # Save initialization info for health check
+        app.state.init_result = init_result
+    except Exception as e:
+        logger.error(f"Error during application initialization: {str(e)}")
+        logger.error(traceback.format_exc())
+        app.state.init_result = {
+            "success": False,
+            "error": str(e),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    
     # Check initial model status
     global model, model_loaded
     if model_loaded:
         logger.info("Model pre-loaded successfully")
     else:
-        logger.warning("Model not pre-loaded, will be loaded on first request")
+        logger.warning("Model will be loaded on first request")
+        
+        # Try to pre-load the model asynchronously
+        import threading
+        
+        def preload_model_thread():
+            try:
+                global model, model_loaded
+                logger.info("Starting asynchronous model pre-loading")
+                model_loaded = load_model()
+                if model_loaded:
+                    logger.info("Model pre-loaded successfully in background thread")
+                else:
+                    logger.error("Failed to pre-load model in background thread")
+            except Exception as e:
+                logger.error(f"Error in model pre-loading thread: {str(e)}")
+        
+        # Start pre-loading in a background thread to avoid blocking startup
+        preload_thread = threading.Thread(target=preload_model_thread)
+        preload_thread.daemon = True
+        preload_thread.start()
+        logger.info("Started background thread for model pre-loading")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -375,102 +420,344 @@ async def root():
     """
     global model, model_loaded, model_status
     
-    # Run a fresh model path check to see all available locations
-    model_found, current_path = find_model_file()
-    all_locations = []
+    # Track execution time of the health check
+    health_check_start = time.time()
     
-    # Check if paths have changed since last load
+    # 1. Get initialization information from app state
+    init_info = getattr(app.state, 'init_result', {})
+    
+    # 2. Run a fresh model path check for latest information
+    from .utils.model_utils import find_model_file, ensure_model_availability
+    from .utils.initialization import detect_environment
+    
+    # Get detailed environment information
+    env_info = detect_environment()
+    
+    # Check model locations
+    model_found, current_path = find_model_file()
+    
+    # Update model status if paths have changed
     if current_path != model_status["path"] and model_found:
         logger.info(f"Model location changed from {model_status['path']} to {current_path}")
         model_status["path"] = current_path
         model_status["exists"] = model_found
     
-    # Gather all possible model locations for diagnostics
-    search_paths = []
-    # 1. Check environment variable paths
+    # Gather all model locations for comprehensive diagnostics
+    all_model_locations = []
+    
+    # Get filesystem search results for the model
+    model_files_found = []
+    try:
+        import subprocess
+        if env_info.get("in_docker") or env_info.get("on_render"):
+            # In container environments, use find command for broader search
+            find_cmd = "find / -name 'BERTSQUADFP16.mlmodel' -type f 2>/dev/null | grep -v 'Permission denied'"
+            result = subprocess.run(find_cmd, shell=True, capture_output=True, text=True)
+            if result.stdout:
+                model_files_found = result.stdout.strip().split('\n')
+        else:
+            # In local development, search common directories
+            search_dirs = [
+                os.getcwd(),
+                os.path.dirname(os.getcwd()),
+                os.path.join(os.getcwd(), "backend"),
+                os.path.join(os.getcwd(), "backend", "app"),
+                os.path.join(os.getcwd(), "backend", "app", "model")
+            ]
+            for d in search_dirs:
+                for root, _, files in os.walk(d):
+                    if "BERTSQUADFP16.mlmodel" in files:
+                        model_files_found.append(os.path.join(root, "BERTSQUADFP16.mlmodel"))
+    except Exception as e:
+        logger.error(f"Error searching for model files: {str(e)}")
+    
+    # Get all potential model locations
+    all_potential_paths = []
+    
+    # 1. Add environment variable path
     model_data_path = os.environ.get('MODEL_DATA_PATH')
     if model_data_path:
-        search_paths.append(os.path.join(model_data_path, "BERTSQUADFP16.mlmodel"))
+        all_potential_paths.append(os.path.join(model_data_path, "BERTSQUADFP16.mlmodel"))
     
-    # 2. Check additional search paths from environment
+    # 2. Add search paths from environment
     if os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS'):
         for path in os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS', '').split(','):
             if path.strip():
-                search_paths.append(os.path.join(path.strip(), "BERTSQUADFP16.mlmodel"))
+                all_potential_paths.append(os.path.join(path.strip(), "BERTSQUADFP16.mlmodel"))
     
     # 3. Add standard locations
     app_dir = os.path.dirname(os.path.abspath(__file__))
-    search_paths.append(os.path.join(app_dir, "model", "BERTSQUADFP16.mlmodel"))
-    search_paths.append(os.path.join(os.path.dirname(app_dir), "BERTSQUADFP16.mlmodel"))
-    search_paths.append("/app/app/model/BERTSQUADFP16.mlmodel")
-    search_paths.append("/tmp/model/BERTSQUADFP16.mlmodel")
+    standard_paths = [
+        os.path.join(app_dir, "model", "BERTSQUADFP16.mlmodel"),
+        os.path.join(os.path.dirname(app_dir), "BERTSQUADFP16.mlmodel"),
+        "/app/app/model/BERTSQUADFP16.mlmodel",
+        "/tmp/model/BERTSQUADFP16.mlmodel",
+        "/opt/render/project/src/backend/app/model/BERTSQUADFP16.mlmodel",
+        "/opt/render/project/src/backend/BERTSQUADFP16.mlmodel"
+    ]
+    all_potential_paths.extend(standard_paths)
     
-    # Report on all model locations
-    for path in search_paths:
-        exists = os.path.exists(path)
-        size = os.path.getsize(path) / (1024 * 1024) if exists else 0
-        all_locations.append({
-            "path": path,
-            "exists": exists,
-            "size_mb": round(size, 2) if exists else 0,
-            "current": path == model_status["path"]
-        })
+    # 4. Add paths found during filesystem search
+    all_potential_paths.extend(model_files_found)
+    
+    # Remove duplicates while preserving order
+    all_potential_paths = list(dict.fromkeys(all_potential_paths))
+    
+    # Check each path and add to diagnostics
+    for path in all_potential_paths:
+        try:
+            exists = os.path.exists(path)
+            size = 0
+            is_valid = False
+            access_error = None
+            
+            if exists:
+                try:
+                    size = os.path.getsize(path) / (1024 * 1024)
+                    # Simple validation - check file size is reasonable
+                    is_valid = size > 10  # Assume model is at least 10MB
+                except Exception as e:
+                    access_error = str(e)
+            
+            all_model_locations.append({
+                "path": path,
+                "exists": exists,
+                "size_mb": round(size, 2) if exists else 0,
+                "current": path == model_status["path"],
+                "valid": is_valid,
+                "error": access_error
+            })
+        except Exception as e:
+            # Some paths might not be accessible
+            all_model_locations.append({
+                "path": path,
+                "exists": False,
+                "error": str(e)
+            })
     
     # Try to reload the model if it's not loaded
+    model_load_triggered = False
     if model is None and not model_status["loaded"] and not model_loaded:
-        logger.info("Model not loaded, attempting to load in health check")
-        model_loaded = load_model()
+        logger.info("Model not loaded, attempting quick load check")
+        if model_found:
+            model_load_triggered = True
+            # Don't block health check with full model loading
+            import threading
+            
+            def background_load():
+                global model_loaded
+                logger.info("Loading model in background thread from health check")
+                model_loaded = load_model()
+                logger.info(f"Background model load completed, success: {model_loaded}")
+            
+            thread = threading.Thread(target=background_load)
+            thread.daemon = True
+            thread.start()
     
-    # Prepare enhanced status response
+    # Free Tier: Skip disk space checks to maintain compatibility
+    # Just report a simple status message instead
+    disk_space = {
+        "note": "Disk space reporting disabled for Free Tier compatibility",
+        "status": "Available disk space should be sufficient for model storage"
+    }
+    
+    # Prepare comprehensive status response with actionable diagnostics
     response = {
         "status": "healthy" if model_status["loaded"] else "degraded",
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "environment": settings.environment,
+        "environment": env_info.get("environment", settings.environment),
         "model": {
             "loaded": model_status["loaded"],
             "current_path": model_status["path"],
             "file_exists": model_status["exists"],
             "load_attempts": model_status["load_attempts"],
             "last_attempt": model_status["last_attempt_time"],
-            "alternate_paths": model_status.get("alternate_paths", []),
-            "all_locations": all_locations
+            "model_found": model_found,
+            "alternative_locations": all_model_locations
         },
         "diagnostics": {
+            "runtime_info": {
+                "python_version": sys.version.split()[0],
+                "coremltools_version": getattr(ct, "__version__", "unknown"),
+                "cwd": os.getcwd(),
+                "pid": os.getpid(),
+                "memory_info": {
+                    "available_gb": round(psutil.virtual_memory().available / (1024**3), 2) if 'psutil' in sys.modules else "N/A",
+                    "total_gb": round(psutil.virtual_memory().total / (1024**3), 2) if 'psutil' in sys.modules else "N/A"
+                }
+            },
+            "initialization": init_info,
             "deployment_info": {
+                "in_docker": env_info.get("in_docker", False),
+                "on_render": env_info.get("on_render", False),
                 "model_data_path_env": model_data_path or "Not set",
                 "search_paths_env": os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS', "Not set"),
-                "environment": settings.environment,
-                "app_directory": app_dir,
-                "running_in_docker": os.path.exists("/.dockerenv") or os.environ.get("RUNNING_IN_DOCKER") == "true"
-            }
+                "hostname": env_info.get("hostname", "unknown"),
+                "load_triggered": model_load_triggered
+            },
+            "disk_space": disk_space,
+            "startup_time": app.state.startup_time if hasattr(app.state, 'startup_time') else "unknown",
+            "health_check_time": round(time.time() - health_check_start, 3)
         },
-        "api_version": "1.0.0"
+        "api_version": settings.version
     }
     
-    # If we have an error, include it
+    # Add more info if model is loaded
+    if model_status["loaded"]:
+        response["model"]["model_info"] = {
+            "description": model_status["details"].get("description", "Unknown"),
+            "load_time_sec": model_status["details"].get("load_time_sec", 0),
+            "inputs": model_status["details"].get("inputs", []),
+            "outputs": model_status["details"].get("outputs", [])
+        }
+    
+    # If we have an error, include it with troubleshooting info
     if model_status["last_error"]:
         response["model"]["error"] = model_status["last_error"]
+        response["model"]["error_help"] = model_status["last_error"].replace("/", "\/")
         
         # Add troubleshooting suggestions based on the error
-        if "not found" in model_status["last_error"].lower():
-            response["diagnostics"]["suggestions"] = [
-                "Ensure the model file is downloaded and available at one of the search paths",
-                "Check if the GitHub Action workflow has successfully run",
-                "Verify that Git LFS is properly configured and the model file is being tracked",
-                "Try copying the model file manually to /tmp/model/ or /app/app/model/"
-            ]
-        elif "load" in model_status["last_error"].lower():
-            response["diagnostics"]["suggestions"] = [
-                "Verify the model file is not corrupted",
-                "Check if coremltools is properly installed",
-                "Ensure the server has sufficient memory to load the model"
-            ]
+        if "not found" in model_status["last_error"].lower() or "no such file" in model_status["last_error"].lower():
+            # Model not found - comprehensive instructions
+            response["diagnostics"]["action_plan"] = {
+                "error_type": "MODEL_NOT_FOUND",
+                "steps": [
+                    {
+                        "id": "check_model_exists",
+                        "description": "Verify model file exists in repository",
+                        "details": f"Found {len([loc for loc in all_model_locations if loc['exists']])} potential model files",
+                        "command": "find / -name 'BERTSQUADFP16.mlmodel' -type f 2>/dev/null"
+                    },
+                    {
+                        "id": "check_render_disk",
+                        "description": "Check if persistent disk is mounted correctly on Render",
+                        "details": "Ensure the mountPath in render.yaml is correctly set to /opt/render/project/src/backend/app/model",
+                        "command": "ls -la /opt/render/project/src/backend/app/model/"
+                    },
+                    {
+                        "id": "manually_download",
+                        "description": "Try downloading the model directly",
+                        "details": "Use the /api/download-model endpoint to force a model download",
+                        "command": "curl -X POST https://yourdomain.com/api/download-model"
+                    },
+                    {
+                        "id": "check_docker",
+                        "description": "For Docker deployments, ensure volumes are correctly mounted",
+                        "details": "Check docker-compose.yml volume mappings",
+                        "command": "docker-compose config"
+                    }
+                ],
+                "likely_cause": "The model file could not be found at any of the expected locations. "
+                               + "This could be due to Git LFS issues, incorrect deployment configuration, "
+                               + "or permissions problems."
+            }
+        elif "memory" in model_status["last_error"].lower():
+            # Memory-related issues
+            response["diagnostics"]["action_plan"] = {
+                "error_type": "MEMORY_ERROR",
+                "steps": [
+                    {
+                        "id": "check_resources",
+                        "description": "Check available memory",
+                        "details": "The model requires at least 2GB of free memory to load",
+                        "command": "free -h"
+                    },
+                    {
+                        "id": "increase_resources",
+                        "description": "Increase memory allocation for the service",
+                        "details": "On Render, upgrade to a plan with more memory"
+                    }
+                ],
+                "likely_cause": "The server doesn't have enough memory to load the model. "
+                               + "CoreML models can require significant memory resources."
+            }
+        else:
+            # Generic model loading issues
+            response["diagnostics"]["action_plan"] = {
+                "error_type": "MODEL_LOADING_ERROR",
+                "steps": [
+                    {
+                        "id": "verify_model",
+                        "description": "Verify model integrity",
+                        "details": "Check if the model file is corrupted",
+                        "command": "cd backend && python verify_model.py"
+                    },
+                    {
+                        "id": "check_coremltools",
+                        "description": "Verify coremltools installation",
+                        "details": "Make sure coremltools is properly installed",
+                        "command": "pip install --upgrade coremltools==7.0"
+                    },
+                    {
+                        "id": "restart_service",
+                        "description": "Restart the service",
+                        "details": "Try restarting the service to clear memory"
+                    }
+                ],
+                "likely_cause": "There was an error loading the model with coremltools. "
+                               + "This could be due to model corruption, compatibility issues, "
+                               + "or resource constraints."
+            }
     
-    # Include model details if available
-    if model_status["details"]:
-        response["model"]["details"] = model_status["details"]
+    # Add manual download link if model is not found
+    if not model_found:
+        download_url = os.environ.get("MODEL_DOWNLOAD_URL", 
+            "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=ho9dyrm6&dl=1")
+        response["diagnostics"]["download_info"] = {
+            "manual_download_url": download_url,
+            "api_download_endpoint": "/api/download-model",
+            "target_location": model_status["path"]
+        }
+    
+    # Include debug info for developers
+    if settings.debug or settings.environment != "production":
+        response["debug_info"] = {
+            "python_path": sys.path,
+            "loaded_modules": list(sys.modules.keys())[:20],  # First 20 modules
+            "environment_variables": {k: v for k, v in os.environ.items() 
+                                      if not any(secret in k.lower() for secret in ['key', 'secret', 'password', 'token'])}
+        }
     
     return response
+
+
+@app.post("/api/download-model")
+async def download_model_endpoint():
+    """Force download the model file from Dropbox."""
+    try:
+        from .utils.initialization import download_model_from_dropbox
+        
+        # Execute the download
+        result = download_model_from_dropbox()
+        
+        if result["success"]:
+            # Try to ensure the model is available in multiple locations
+            from .utils.model_utils import ensure_model_availability
+            ensure_result = ensure_model_availability()
+            
+            # Try to load the model
+            global model_loaded
+            model_loaded = load_model()
+            
+            return {
+                "success": True,
+                "message": f"Model downloaded successfully to {result['path']} ({result['size_mb']:.2f} MB)",
+                "model_loaded": model_loaded,
+                "download_details": result,
+                "copies": ensure_result.get("copied_to", [])
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to download model: {result.get('error', 'Unknown error')}"
+            )
+    except Exception as e:
+        logger.error(f"Error in download-model endpoint: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error downloading model: {str(e)}"
+        )
 
 @app.post("/api/query", response_model=Dict[str, Any])
 @rate_limit_ip_and_tokens(settings.api.rate_limit_calls)
