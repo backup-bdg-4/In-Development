@@ -554,23 +554,12 @@ async def root():
             thread.daemon = True
             thread.start()
     
-    # Get disk space information to help diagnose storage issues
-    disk_space = {}
-    try:
-        import shutil
-        # Check disk space for common directories
-        for path in ["/", "/tmp", "/app", os.getcwd()]:
-            if os.path.exists(path):
-                usage = shutil.disk_usage(path)
-                disk_space[path] = {
-                    "total_gb": round(usage.total / (1024**3), 2),
-                    "used_gb": round(usage.used / (1024**3), 2),
-                    "free_gb": round(usage.free / (1024**3), 2),
-                    "percent_used": round((usage.used / usage.total) * 100, 1)
-                }
-    except Exception as e:
-        logger.error(f"Error getting disk space: {str(e)}")
-        disk_space["error"] = str(e)
+    # Free Tier: Skip disk space checks to maintain compatibility
+    # Just report a simple status message instead
+    disk_space = {
+        "note": "Disk space reporting disabled for Free Tier compatibility",
+        "status": "Available disk space should be sufficient for model storage"
+    }
     
     # Prepare comprehensive status response with actionable diagnostics
     response = {

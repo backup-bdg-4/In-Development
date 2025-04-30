@@ -18,15 +18,25 @@ logger = logging.getLogger(__name__)
 def detect_environment() -> Dict[str, Any]:
     """
     Detect the current runtime environment.
+    Free Tier compatible version that prioritizes /tmp storage.
     
     Returns:
         Dict with environment information
     """
+    # Detect if we're on Render
+    is_on_render = os.environ.get("RUNNING_ON_RENDER") == "true" or "render" in os.environ.get("HOSTNAME", "")
+    is_in_docker = os.path.exists("/.dockerenv")
+    
+    # If on Render Free Tier, prefer /tmp/model path since it's most reliable
+    if is_on_render:
+        os.environ["MODEL_DATA_PATH"] = "/tmp/model"
+    
     env_info = {
         "environment": os.environ.get("ENVIRONMENT", "development"),
-        "in_docker": os.path.exists("/.dockerenv"),
-        "on_render": os.environ.get("RUNNING_ON_RENDER") == "true",
-        "python_version": sys.version,
+        "in_docker": is_in_docker,
+        "on_render": is_on_render,
+        "on_render_free_tier": is_on_render,  # Assume Free Tier by default for safety
+        "python_version": sys.version.split()[0],
         "model_data_path": os.environ.get("MODEL_DATA_PATH"),
         "cwd": os.getcwd(),
         "parent_dir": os.path.dirname(os.getcwd()),
@@ -34,21 +44,16 @@ def detect_environment() -> Dict[str, Any]:
         "hostname": os.environ.get("HOSTNAME", "unknown"),
     }
     
-    # Add render-specific information if running on render
+    # Add minimal Render-specific information for diagnostics
     if env_info["on_render"]:
-        env_info["render_service_id"] = os.environ.get("RENDER_SERVICE_ID")
-        env_info["render_instance_id"] = os.environ.get("RENDER_INSTANCE_ID")
-        env_info["render_git_commit"] = os.environ.get("RENDER_GIT_COMMIT")
+        env_info["render_service_id"] = os.environ.get("RENDER_SERVICE_ID", "unknown")
         
-    # Add Docker-specific information if running in Docker
-    if env_info["in_docker"]:
-        env_info["docker_hostname"] = os.environ.get("HOSTNAME")
-    
     return env_info
 
 def create_directories() -> Dict[str, bool]:
     """
     Create necessary directories for the application.
+    Free Tier compatible version that prioritizes /tmp/model directory.
     
     Returns:
         Dict with directory creation results
@@ -58,41 +63,68 @@ def create_directories() -> Dict[str, bool]:
     # Get environment info
     env_info = detect_environment()
     
+    # For Render Free Tier, prioritize the /tmp/model directory
+    if env_info["on_render"]:
+        logger.info("Rendering Free Tier detected - prioritizing /tmp/model")
+        # Always set MODEL_DATA_PATH to /tmp/model on Render Free Tier
+        os.environ["MODEL_DATA_PATH"] = "/tmp/model"
+    
     # Define directories to create
     directories = [
+        # Temp directory (high priority for Free Tier)
+        "/tmp/model",
+        
         # App-specific directories
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"),
         
-        # Check if MODEL_DATA_PATH is set
-        env_info.get("model_data_path")
+        # Check if MODEL_DATA_PATH is set and different from /tmp/model
+        env_info.get("model_data_path") if env_info.get("model_data_path") != "/tmp/model" else None
     ]
     
-    # Add environment-specific directories
+    # Add basic Render paths (avoid persistent disk paths for Free Tier)
     if env_info["on_render"]:
         render_dirs = [
-            "/opt/render/project/src/backend/app/model",
-            "/tmp/model"
+            # Current directory models
+            os.path.join(os.getcwd(), "backend", "app", "model"),
+            os.path.join(os.getcwd(), "backend"),
+            # Standard Render paths
+            "/opt/render/project/src/backend/app/model"
         ]
         directories.extend(render_dirs)
     
     if env_info["in_docker"]:
         docker_dirs = [
             "/app/app/model",
-            "/app/backend/app/model",
-            "/tmp/model"
+            "/app/backend/app/model"
         ]
         directories.extend(docker_dirs)
     
+    # Remove duplicates and None values
+    directories = [d for d in directories if d]
+    directories = list(dict.fromkeys(directories))
+    
     # Create each directory
+    logger.info(f"Creating {len(directories)} directories for model storage")
     for directory in directories:
-        if directory:  # Skip None values
-            try:
-                os.makedirs(directory, exist_ok=True)
-                results[directory] = True
-                logger.info(f"Created directory: {directory}")
-            except Exception as e:
-                results[directory] = False
-                logger.error(f"Failed to create directory {directory}: {str(e)}")
+        try:
+            os.makedirs(directory, exist_ok=True)
+            results[directory] = True
+            logger.info(f"✓ Created directory: {directory}")
+        except Exception as e:
+            results[directory] = False
+            logger.warning(f"✗ Failed to create directory {directory}: {str(e)}")
+    
+    # Make sure /tmp/model exists and is writable
+    if "/tmp/model" in results and results["/tmp/model"]:
+        try:
+            # Test write access
+            test_file = os.path.join("/tmp/model", ".write_test")
+            with open(test_file, 'w') as f:
+                f.write("test")
+            os.remove(test_file)
+            logger.info("✓ /tmp/model is writable (good for Free Tier)")
+        except Exception as e:
+            logger.warning(f"✗ /tmp/model exists but is not writable: {str(e)}")
     
     return results
 
@@ -131,10 +163,11 @@ def download_model_from_dropbox(
 ) -> Dict[str, Any]:
     """
     Download the model file directly from Dropbox.
+    Free Tier compatible version that prioritizes /tmp/model.
     
     Args:
         dropbox_link: Dropbox direct download link
-        output_path: Path to save the model file (if None, uses MODEL_DATA_PATH or app/model)
+        output_path: Path to save the model file (if None, uses /tmp/model for Free Tier)
         
     Returns:
         Dict with status information
@@ -142,18 +175,30 @@ def download_model_from_dropbox(
     # Create directories first
     create_directories()
     
-    # Determine output path if not provided
+    # Get environment info
+    env_info = detect_environment()
+    
+    # Determine output path if not provided (prioritize /tmp/model for Free Tier)
     if not output_path:
-        model_data_path = os.environ.get('MODEL_DATA_PATH')
-        if model_data_path:
-            output_path = os.path.join(model_data_path, "BERTSQUADFP16.mlmodel")
+        if env_info["on_render"]:
+            # Always use /tmp/model on Render Free Tier
+            output_path = "/tmp/model/BERTSQUADFP16.mlmodel"
+            logger.info("Render Free Tier detected - downloading to /tmp/model")
         else:
-            # Use app/model directory as fallback
-            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            output_path = os.path.join(app_dir, "model", "BERTSQUADFP16.mlmodel")
+            # Use MODEL_DATA_PATH if set
+            model_data_path = os.environ.get('MODEL_DATA_PATH')
+            if model_data_path:
+                output_path = os.path.join(model_data_path, "BERTSQUADFP16.mlmodel")
+            else:
+                # Use app/model directory as fallback
+                app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                output_path = os.path.join(app_dir, "model", "BERTSQUADFP16.mlmodel")
     
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Make sure /tmp/model exists as well (for redundancy)
+    os.makedirs("/tmp/model", exist_ok=True)
     
     # Track time for the operation
     start_time = time.time()
@@ -185,23 +230,50 @@ def download_model_from_dropbox(
                             logger.info(f"Download progress: {progress:.1f}% ({downloaded/(1024*1024):.1f} MB / {total_size_mb:.1f} MB)")
         
         # Verify the file was downloaded successfully
-        if os.path.exists(output_path):
+        download_succeeded = os.path.exists(output_path)
+        
+        # For Free Tier compatibility, always create a copy in /tmp/model
+        if download_succeeded and output_path != "/tmp/model/BERTSQUADFP16.mlmodel":
+            try:
+                tmp_path = "/tmp/model/BERTSQUADFP16.mlmodel"
+                logger.info(f"Creating Free Tier copy in {tmp_path}")
+                shutil.copy2(output_path, tmp_path)
+            except Exception as e:
+                logger.warning(f"Failed to create Free Tier copy in /tmp/model: {str(e)}")
+        
+        if download_succeeded:
             file_size = os.path.getsize(output_path)
             logger.info(f"Downloaded {file_size/(1024*1024):.2f} MB in {time.time() - start_time:.1f} seconds")
             
-            # Copy to other important locations for redundancy
-            try:
-                from .model_utils import ensure_model_availability
-                ensure_result = ensure_model_availability()
-                logger.info(f"Model copied to {len(ensure_result.get('copied_to', []))} additional locations")
-            except Exception as copy_error:
-                logger.error(f"Error copying model to additional locations: {str(copy_error)}")
+            # Copy to all key locations and check for redundancy
+            copied_locations = []
             
+            # Copy to important locations manually for Free Tier compatibility
+            key_locations = [
+                "/tmp/model/BERTSQUADFP16.mlmodel",  # Free Tier primary location
+                os.path.join(os.getcwd(), "backend/app/model/BERTSQUADFP16.mlmodel")  # Local directory
+            ]
+            
+            # Try copying to each location
+            for loc in key_locations:
+                if loc != output_path:
+                    try:
+                        dirname = os.path.dirname(loc)
+                        os.makedirs(dirname, exist_ok=True)
+                        shutil.copy2(output_path, loc)
+                        copied_locations.append(loc)
+                        logger.info(f"Created redundant copy at {loc}")
+                    except Exception as e:
+                        logger.warning(f"Could not copy to {loc}: {str(e)}")
+            
+            # Return success with copied locations
             return {
                 "success": True,
                 "path": output_path,
                 "size_mb": file_size / (1024 * 1024),
-                "download_time_sec": time.time() - start_time
+                "download_time_sec": time.time() - start_time,
+                "copies": copied_locations,
+                "free_tier_compatible": "/tmp/model/BERTSQUADFP16.mlmodel" in copied_locations
             }
         else:
             return {
