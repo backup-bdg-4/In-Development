@@ -11,37 +11,130 @@ services:
         value: production
       - key: LOG_LEVEL
         value: info
+      # Use both locations for redundancy
       - key: MODEL_DATA_PATH
-        value: /tmp/model
+        value: /opt/render/project/src/backend/app/model
       - key: BACKDOOR_MODEL_SEARCH_PATHS
-        value: "/tmp/model,/app,/app/app/model,/app/backend,/app/backend/app/model"
-    # Note: Using multiple possible model locations for flexibility
-    # The app will search in multiple locations for the model
+        value: "/opt/render/project/src/backend/app/model,/opt/render/project/src,/opt/render/project/src/backend,/opt/render/project,/app/app/model,/app,/tmp/model"
+      # Flag to indicate we're running on Render
+      - key: RUNNING_ON_RENDER
+        value: "true"
+      # Disable model download timeout for initial load
+      - key: MODEL_LOAD_TIMEOUT
+        value: "120"
+    # Render-specific settings
+    disk:
+      name: model-data
+      mountPath: /opt/render/project/src/backend/app/model
+      sizeGB: 1
     healthCheckPath: /
     buildCommand: |
-      mkdir -p /tmp/model
+      echo "===== BUILD STAGE ====="
+      mkdir -p /opt/render/project/src/backend/app/model
+      
+      # Display the repository structure for diagnostic information
+      echo "Repository structure:"
+      find . -name "*.mlmodel" -type f | sort
+      
       # Try to use the model provided by GitHub Action workflow first
       if [ -f "BERTSQUADFP16.mlmodel" ]; then
-        echo "Using model from repository root"
-        cp BERTSQUADFP16.mlmodel /tmp/model/
+        echo "✅ Found model in repository root"
+        cp BERTSQUADFP16.mlmodel /opt/render/project/src/backend/app/model/
+        echo "✓ Copied to /opt/render/project/src/backend/app/model/"
       elif [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
-        echo "Using model from backend directory"
-        cp backend/BERTSQUADFP16.mlmodel /tmp/model/
+        echo "✅ Found model in backend directory"
+        cp backend/BERTSQUADFP16.mlmodel /opt/render/project/src/backend/app/model/
+        echo "✓ Copied to /opt/render/project/src/backend/app/model/"
       else
-        echo "Model not found in repository, attempting to download"
+        echo "⚠️ Model not found in repository, attempting to download"
+        cd backend
         python download_model.py
+        cd ..
       fi
+      
+      # Verify the model exists in the expected location
+      if [ -f "/opt/render/project/src/backend/app/model/BERTSQUADFP16.mlmodel" ]; then
+        echo "✅ Model successfully installed in persistent disk location"
+        ls -la /opt/render/project/src/backend/app/model/
+      else
+        echo "❌ WARNING: Model not found in persistent disk location"
+        # Try one more time with direct path
+        if [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
+          echo "⚠️ Trying direct copy again"
+          mkdir -p /opt/render/project/src/backend/app/model/
+          cp backend/BERTSQUADFP16.mlmodel /opt/render/project/src/backend/app/model/
+        fi
+      fi
+      
+      # Print disk usage information
+      echo "Disk usage:"
+      df -h
+      
       # Create all possible model directories for redundancy
-      mkdir -p app/model
-      echo "Model setup complete"
+      mkdir -p backend/app/model
+      mkdir -p /tmp/model
+      
+      # Attempt to copy to all possible locations for maximum redundancy
+      for dest in "/opt/render/project/src/backend/app/model" "/tmp/model" "backend/app/model"; do
+        if [ -f "BERTSQUADFP16.mlmodel" ]; then
+          echo "Copying from repo root to $dest"
+          mkdir -p $dest
+          cp BERTSQUADFP16.mlmodel $dest/
+        elif [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
+          echo "Copying from backend dir to $dest"
+          mkdir -p $dest
+          cp backend/BERTSQUADFP16.mlmodel $dest/
+        fi
+      done
+      
+      echo "===== BUILD COMPLETE ====="
+      
     startCommand: |
-      echo "Starting with MODEL_DATA_PATH=${MODEL_DATA_PATH}"
-      echo "Listing possible model locations:"
-      ls -la /tmp/model/ || echo "No /tmp/model directory"
-      ls -la /app/app/model/ || echo "No /app/app/model directory"
-      ls -la /app/ || echo "No models in /app"
-      ls -la backend/ || echo "No models in backend/"
-      # Start the application
+      echo "===== STARTING APPLICATION ====="
+      echo "Environment information:"
+      echo "ENVIRONMENT=${ENVIRONMENT}"
+      echo "MODEL_DATA_PATH=${MODEL_DATA_PATH}"
+      echo "RUNNING_ON_RENDER=${RUNNING_ON_RENDER}"
+      
+      # First, ensure all model directories exist
+      mkdir -p /opt/render/project/src/backend/app/model
+      mkdir -p /tmp/model
+      mkdir -p app/model
+      
+      echo "Searching for model file:"
+      find / -name "BERTSQUADFP16.mlmodel" -type f 2>/dev/null | grep -v "Permission denied"
+      
+      # If model exists in backend dir but not in target locations, copy it
+      if [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
+        echo "Found model in backend directory, copying to target locations"
+        cp backend/BERTSQUADFP16.mlmodel /opt/render/project/src/backend/app/model/ 2>/dev/null || echo "Failed to copy to opt path"
+        cp backend/BERTSQUADFP16.mlmodel /tmp/model/ 2>/dev/null || echo "Failed to copy to tmp path"
+      fi
+      
+      # Try to download explicitly if model not found
+      if [ ! -f "/opt/render/project/src/backend/app/model/BERTSQUADFP16.mlmodel" ] && [ ! -f "/tmp/model/BERTSQUADFP16.mlmodel" ]; then
+        echo "Model not found, attempting explicit download"
+        cd backend
+        python download_model.py
+        cd ..
+        
+        # Copy the downloaded model to all target locations
+        for src in "backend/app/model/BERTSQUADFP16.mlmodel" "backend/BERTSQUADFP16.mlmodel"; do
+          if [ -f "$src" ]; then
+            echo "Copying from $src to target locations"
+            cp $src /opt/render/project/src/backend/app/model/ 2>/dev/null || echo "Failed to copy to opt path"
+            cp $src /tmp/model/ 2>/dev/null || echo "Failed to copy to tmp path"
+          fi
+        done
+      fi
+      
+      echo "Final model locations check:"
+      ls -la /opt/render/project/src/backend/app/model/ || echo "No models in opt path"
+      ls -la /tmp/model/ || echo "No models in tmp path"
+      ls -la backend/app/model/ || echo "No models in backend app model path"
+      
+      echo "Starting application..."
+      cd backend
       uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
   # Frontend service
