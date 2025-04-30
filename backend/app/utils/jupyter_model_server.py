@@ -301,27 +301,73 @@ def execute_notebook_cell(notebook_path: str, cell_index: int) -> Dict[str, Any]
         with open(notebook_path, 'r') as f:
             notebook = json.load(f)
         
+        # Get the notebook name from the path
+        notebook_name = os.path.basename(notebook_path)
+        
+        # Create a checkpoint first
+        try:
+            response = requests.post(
+                f"{JUPYTER_SERVER_URL}/api/contents/{notebook_name}/checkpoints",
+                headers={"Content-Type": "application/json"},
+                json={}
+            )
+            
+            if response.status_code not in [201, 200]:
+                logger.error(f"Failed to create checkpoint: {response.text}")
+                return {"success": False, "error": f"Failed to create checkpoint: {response.text}"}
+        except Exception as e:
+            logger.error(f"Error creating checkpoint: {str(e)}")
+            return {"success": False, "error": f"Error creating checkpoint: {str(e)}"}
+        
         # Execute the cell using the Jupyter API
-        response = requests.post(
-            f"{JUPYTER_SERVER_URL}/api/contents/{os.path.basename(notebook_path)}/checkpoints",
-            json={"cells": notebook["cells"]}
-        )
-        
-        if response.status_code != 201:
-            logger.error(f"Failed to create checkpoint: {response.text}")
-            return {"success": False, "error": "Failed to create checkpoint"}
-        
-        # Execute the cell
-        response = requests.post(
-            f"{JUPYTER_SERVER_URL}/api/cells/{os.path.basename(notebook_path)}/{cell_index}/execute",
-            json={}
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"Failed to execute cell: {response.text}")
-            return {"success": False, "error": "Failed to execute cell"}
-        
-        return {"success": True, "result": response.json()}
+        try:
+            # Get the cell content
+            cell_content = notebook["cells"][cell_index]["source"]
+            cell_content_str = "".join(cell_content)
+            
+            # Execute the cell
+            response = requests.post(
+                f"{JUPYTER_SERVER_URL}/api/kernels",
+                headers={"Content-Type": "application/json"},
+                json={}
+            )
+            
+            if response.status_code != 201:
+                logger.error(f"Failed to create kernel: {response.text}")
+                return {"success": False, "error": f"Failed to create kernel: {response.text}"}
+            
+            kernel_id = response.json()["id"]
+            
+            # Execute the code in the kernel
+            response = requests.post(
+                f"{JUPYTER_SERVER_URL}/api/kernels/{kernel_id}/execute",
+                headers={"Content-Type": "application/json"},
+                json={"code": cell_content_str}
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to execute cell: {response.text}")
+                return {"success": False, "error": f"Failed to execute cell: {response.text}"}
+            
+            msg_id = response.json()["msg_id"]
+            
+            # Wait for execution to complete
+            for _ in range(30):  # Wait up to 30 seconds
+                response = requests.get(
+                    f"{JUPYTER_SERVER_URL}/api/kernels/{kernel_id}/messages?msg_id={msg_id}"
+                )
+                
+                if response.status_code == 200:
+                    return {"success": True, "result": response.json()}
+                
+                time.sleep(1)
+            
+            logger.error("Cell execution timed out")
+            return {"success": False, "error": "Cell execution timed out"}
+            
+        except Exception as e:
+            logger.error(f"Error executing cell: {str(e)}")
+            return {"success": False, "error": f"Error executing cell: {str(e)}"}
     
     except Exception as e:
         logger.error(f"Error executing notebook cell: {str(e)}")
@@ -338,6 +384,11 @@ def initialize_model_server(model_path: str) -> bool:
         True if initialization was successful, False otherwise
     """
     global MODEL_SERVER_READY, MODEL_SERVER_NOTEBOOK
+    
+    # Check if model file exists
+    if not os.path.exists(model_path):
+        logger.error(f"Model file not found at {model_path}")
+        return False
     
     # Start Jupyter server
     server_started = start_jupyter_server(model_path)
