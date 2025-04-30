@@ -1,17 +1,24 @@
 import os
 import subprocess
 import sys
-from download_model import download_model
+from download_model import check_model
 
 def run_backend():
     """Run the backend server locally"""
-    # First, download the model if it doesn't exist
-    if not download_model():
-        print("Failed to download the model. Exiting.")
+    # First, check if the model exists and is valid
+    if not check_model():
+        print("\nERROR: CoreML model verification failed.")
+        print("Make sure the model file is correctly placed in the repository.")
+        print("The model should be managed using Git LFS.")
+        print("\nIf you're a developer with access to the model file:")
+        print("1. Copy the BERTSQUADFP16.mlmodel file to backend/app/model/")
+        print("2. Make sure the file is properly tracked by Git LFS")
+        print("\nExiting...")
         return False
     
     # Run the backend server
     try:
+        print("\nModel verification successful!")
         print("Starting backend server...")
         subprocess.run(["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"])
         return True

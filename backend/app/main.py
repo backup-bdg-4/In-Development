@@ -2,34 +2,106 @@ import os
 import json
 import logging
 import traceback
+import time
 from typing import List, Dict, Any, Optional
 import numpy as np
 import coremltools as ct
-from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 import aiohttp
 import asyncio
 from bs4 import BeautifulSoup
 import requests
 import sys
+from prometheus_fastapi_instrumentator import Instrumentator
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Import configuration and utilities
+from .config import settings
+from .utils.security_utils import setup_security, get_client_info, rate_limit_ip_and_tokens
+from .utils.code_utils import contains_code, is_code_question, format_code_for_response
+from .utils.response_utils import enhance_response, categorize_query, log_query_response
+from .utils.search_utils import search_web, SEARCH_CACHE
+
+# Configure logging based on settings
+logging_level = getattr(logging, settings.logging.level.upper(), logging.INFO)
+logging.basicConfig(
+    level=logging_level,
+    format=settings.logging.format,
+    filename=settings.logging.log_file if settings.logging.log_to_file else None
+)
 logger = logging.getLogger(__name__)
 
-# Initialize FastAPI app
-app = FastAPI(title="Backdoor AI - ML Model API")
+# Initialize FastAPI app with metadata
+app = FastAPI(
+    title=settings.app_name,
+    description="An AI-powered conversational API using Apple's CoreML for natural language processing and question answering",
+    version=settings.version,
+    debug=settings.debug,
+    docs_url="/api/docs" if settings.debug or settings.environment != "production" else None,
+    redoc_url="/api/redoc" if settings.debug or settings.environment != "production" else None
+)
 
-# Add CORS middleware
+# Add CORS middleware with origins from settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=settings.api.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add GZip compression
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Setup security features (rate limiting, secure headers, etc.)
+setup_security(app)
+
+# Add metrics instrumentation if not in production
+if settings.environment != "production":
+    Instrumentator().instrument(app).expose(app)
+
+# Add startup and shutdown event handlers
+@app.on_event("startup")
+async def startup_event():
+    logger.info(f"Starting {settings.app_name} version {settings.version} in {settings.environment} mode")
+    
+    # Import nltk resources if needed
+    try:
+        import nltk
+        nltk.download('punkt', quiet=True)
+        logger.info("NLTK resources loaded")
+    except Exception as e:
+        logger.warning(f"Failed to load NLTK resources: {e}")
+    
+    # Check initial model status
+    global model, model_loaded
+    if model_loaded:
+        logger.info("Model pre-loaded successfully")
+    else:
+        logger.warning("Model not pre-loaded, will be loaded on first request")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info(f"Shutting down {settings.app_name}")
+    
+    # Clear any global resources
+    if 'model' in globals() and model is not None:
+        try:
+            model = None
+            logger.info("Model released from memory")
+        except Exception as e:
+            logger.error(f"Error releasing model: {e}")
+
+# Add redirect from root to docs
+@app.get("/", include_in_schema=False)
+async def redirect_to_docs():
+    if settings.debug or settings.environment != "production":
+        return RedirectResponse(url="/api/docs")
+    else:
+        return {"status": "healthy", "service": settings.app_name}
 
 # Determine model path from environment variable or default location
 model_data_path = os.environ.get('MODEL_DATA_PATH', None)
@@ -76,49 +148,59 @@ def load_model(force_reload=False):
     # Check if model file exists
     model_status["exists"] = os.path.exists(MODEL_PATH)
     
-    # If model doesn't exist, try to download it
+    # If model doesn't exist, show clear error message
     if not model_status["exists"]:
-        logger.warning(f"Model not found at {MODEL_PATH}. Attempting to download...")
-        
-        # Add the parent directory to sys.path to import download_model
+        error_msg = f"""
+=================================================================
+ERROR: CoreML model file not found at {MODEL_PATH}
+=================================================================
+The model file should be placed at the location above.
+
+This model file should be stored using Git LFS in the repository.
+If you're not seeing the file, make sure:
+
+1. You have Git LFS installed: https://git-lfs.github.com
+2. You've pulled the repository with Git LFS enabled:
+   git lfs pull
+
+If you have the model file separately, copy it to the path above.
+=================================================================
+"""
+        logger.error(error_msg)
+        model_status["last_error"] = f"Model file not found at {MODEL_PATH}. Please ensure the CoreML model is properly installed."
+        return False
+    
+    # Model file exists, verify it using check_model
+    try:
+        # Add the parent directory to sys.path to import check_model
         parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if parent_dir not in sys.path:
             sys.path.append(parent_dir)
-        
-        try:
-            # Import the download_model function
-            from download_model import download_model
             
-            # Try to download the model
-            logger.info("Starting model download...")
-            if not download_model():
-                error_msg = "Failed to download model"
-                logger.error(error_msg)
-                model_status["last_error"] = error_msg
-                return False
-            
-            # Update model existence status after download
-            model_status["exists"] = os.path.exists(MODEL_PATH)
-            if not model_status["exists"]:
-                error_msg = "Model download reported success but file doesn't exist"
-                logger.error(error_msg)
-                model_status["last_error"] = error_msg
-                return False
-                
-            logger.info("Model downloaded successfully, now loading...")
+        from download_model import check_model
         
-        except ImportError as e:
-            error_msg = f"Could not import download_model module: {str(e)}"
+        # Check if the model is valid
+        logger.info(f"Verifying model at {MODEL_PATH}...")
+        if not check_model():
+            error_msg = "Model verification failed. The model file exists but may be corrupted."
             logger.error(error_msg)
             model_status["last_error"] = error_msg
             return False
-        
-        except Exception as e:
-            error_msg = f"Unexpected error during model download: {str(e)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
-            model_status["last_error"] = error_msg
-            return False
+            
+        logger.info("Model verification successful, now loading...")
+    
+    except ImportError as e:
+        error_msg = f"Could not import model verification module: {str(e)}"
+        logger.error(error_msg)
+        model_status["last_error"] = error_msg
+        return False
+    
+    except Exception as e:
+        error_msg = f"Unexpected error during model verification: {str(e)}"
+        logger.error(error_msg)
+        logger.error(traceback.format_exc())
+        model_status["last_error"] = error_msg
+        return False
     
     # Load the ML model
     try:
@@ -303,52 +385,132 @@ async def root():
     return response
 
 @app.post("/api/query", response_model=Dict[str, Any])
-async def process_query(request: QueryRequest):
+@rate_limit_ip_and_tokens(settings.api.rate_limit_calls)
+async def process_query(request: QueryRequest, request_obj: Request):
     """Process a query using the ML model"""
     global model, model_loaded
+    
+    # Get client info for tracking and rate limiting
+    client_info = get_client_info(request_obj)
+    
+    # Validate and sanitize the query
+    sanitized_query = sanitize_input(request.query)
+    is_valid, error_message = validate_query(sanitized_query)
+    
+    if not is_valid:
+        logger.warning(f"Invalid query from client {client_info['client_id']}: {error_message}")
+        raise HTTPException(status_code=400, detail=error_message)
     
     # Try to reload the model if it's not loaded
     if model is None and not model_loaded:
         model_loaded = load_model()
     
     if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+        logger.error("Model not loaded - cannot process query")
+        raise HTTPException(status_code=503, detail="AI model not loaded. Please try again later.")
+    
+    # Track processing for performance metrics
+    start_time = time.time()
+    search_results = []
     
     try:
-        # If web search is enabled and no context is provided, fetch context from the web
-        context = request.context
-        if request.web_search and (not context or context.strip() == ""):
-            search_query = request.search_query or request.query
-            context = await search_web(search_query)
+        # Determine if this is a code-related query
+        query_category = categorize_query(sanitized_query)
+        is_code_question = query_category.get("is_code_question", False)
         
-        if not context:
-            context = "No context provided. I'll try to answer based on my knowledge."
+        # Get context - either from request or web search
+        context = request.context
+        
+        # If web search is enabled and no context is provided, fetch context from the web
+        if request.web_search and settings.web_search.enabled and (not context or context.strip() == ""):
+            search_query = request.search_query or sanitized_query
+            logger.info(f"Performing web search for: {search_query}")
+            context = await search_web(search_query)
+            search_results = SEARCH_CACHE.get(search_query.lower().strip(), {}).get("results", [])
+        
+        if not context or context.strip() == "":
+            context = settings.ai_response.default_context
         
         # Prepare input for the model
         model_input = {
-            'query_text': request.query,
+            'query_text': sanitized_query,
             'passage_text': context
         }
         
-        # Get prediction from the model
-        prediction = model.predict(model_input)
+        # Log the input
+        logger.info(f"Model input: query_length={len(sanitized_query)}, context_length={len(context)}")
+        
+        # Set a timeout for the prediction
+        try:
+            # Get prediction from the model
+            with asyncio.timeout(settings.model.predict_timeout_seconds):
+                prediction = model.predict(model_input)
+        except asyncio.TimeoutError:
+            logger.error(f"Model prediction timed out after {settings.model.predict_timeout_seconds} seconds")
+            raise HTTPException(
+                status_code=503, 
+                detail=f"AI model is taking too long to respond. Please try a simpler query."
+            )
         
         # Extract the answer from the prediction
-        answer = extract_answer(prediction, context)
+        result = extract_answer(
+            prediction, 
+            context, 
+            query=sanitized_query,
+            include_confidence=True
+        )
         
         # Determine intent from the query
-        intent = determine_intent(request.query)
+        intent = determine_intent(sanitized_query)
         
-        return {
-            "answer": answer,
+        # Build the response
+        response = {
+            "answer": result["answer"],
             "intent": intent,
-            "context_used": context[:500] + "..." if len(context) > 500 else context
+            "confidence": result["confidence"],
+            "is_code_question": is_code_question,
+            "context_used": True if (context and context != settings.ai_response.default_context) else False,
+            "method": result["method_used"],
+            "processing_time": time.time() - start_time
         }
+        
+        # Log the interaction for monitoring
+        log_query_response(
+            sanitized_query, 
+            result["answer"], 
+            metadata={
+                "client_id": client_info["client_id"],
+                "intent": intent,
+                "confidence": result["confidence"],
+                "method_used": result["method_used"],
+                "processing_time": time.time() - start_time,
+                "is_code_question": is_code_question,
+                "context_used": bool(context and context != settings.ai_response.default_context)
+            }
+        )
+        
+        return response
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions without modification
+        raise
     
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+        
+        # Log the failed interaction
+        log_query_response(
+            sanitized_query, 
+            "ERROR", 
+            metadata={
+                "client_id": client_info["client_id"],
+                "error": str(e),
+                "processing_time": time.time() - start_time
+            }
+        )
+        
+        raise HTTPException(status_code=500, detail=f"Error processing your request: {str(e)}")
 
 @app.post("/api/chat/session", response_model=ChatSession)
 async def create_chat_session():
@@ -357,63 +519,160 @@ async def create_chat_session():
     return {"messages": [], "session_id": session_id}
 
 @app.post("/api/chat/{session_id}", response_model=ChatMessage)
-async def chat(session_id: str, message: ChatMessage):
+@rate_limit_ip_and_tokens(settings.api.rate_limit_calls)
+async def chat(session_id: str, message: ChatMessage, request: Request):
     """Add a message to a chat session and get a response"""
     global model, model_loaded
+    
+    # Get client info for tracking and rate limiting
+    client_info = get_client_info(request)
+    logger.info(f"Chat request from client {client_info['client_id']} for session {session_id}")
+    
+    # Validate and sanitize the message content
+    sanitized_content = sanitize_input(message.content)
+    is_valid, error_message = validate_query(sanitized_content)
+    
+    if not is_valid:
+        logger.warning(f"Invalid chat message from client {client_info['client_id']}: {error_message}")
+        raise HTTPException(status_code=400, detail=error_message)
+    
+    # Track processing for performance metrics
+    start_time = time.time()
     
     # Try to reload the model if it's not loaded
     if model is None and not model_loaded:
         model_loaded = load_model()
     
     if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+        logger.error("Model not loaded - cannot process chat message")
+        raise HTTPException(status_code=503, detail="AI model not loaded. Please try again later.")
     
     try:
         # Process the user message
         if message.role != "user":
             raise HTTPException(status_code=400, detail="Only user messages can be sent")
         
-        # Determine intent
-        intent = determine_intent(message.content)
+        # Analyze the query to determine approach
+        query_category = categorize_query(sanitized_content)
+        is_code_query = query_category.get("is_code_question", False)
+        
+        # Determine intent - either from message or by analyzing content
+        intent = message.intent if message.intent else determine_intent(sanitized_content)
+        
+        # Decide whether to use web search
+        use_web_search = (
+            settings.web_search.enabled and 
+            settings.ai_response.enable_web_search_by_default and
+            ("search" in intent.lower() or "web_search" in intent.lower())
+        )
         
         # Get context from web if needed
-        context = await search_web(message.content) if "search" in intent.lower() else ""
+        context = ""
+        search_results = []
+        
+        if use_web_search:
+            logger.info(f"Performing web search for chat: {sanitized_content[:50]}...")
+            context = await search_web(sanitized_content)
+            # Get the search results for potential citation
+            search_query = sanitized_content.lower().strip()
+            search_results = SEARCH_CACHE.get(search_query, {}).get("results", [])
+        
+        # If no context from search, use default
+        if not context or context.strip() == "":
+            context = settings.ai_response.default_context
+            
+            # For code questions, add a more specific context
+            if is_code_query:
+                lang = query_category.get("language")
+                lang_context = f" I can help with {lang} code." if lang else ""
+                context = f"I'll help you with your coding question.{lang_context} " + context
         
         # Prepare input for the model
         model_input = {
-            'query_text': message.content,
-            'passage_text': context or "Please provide a helpful response based on your knowledge."
+            'query_text': sanitized_content,
+            'passage_text': context
         }
         
         # Log the model input for debugging
-        logger.info(f"Model input: {json.dumps(model_input)}")
+        logger.info(f"Chat model input: query_length={len(sanitized_content)}, context_length={len(context)}")
         
-        # Get prediction from the model
+        # Set a timeout for the prediction
         try:
-            prediction = model.predict(model_input)
-            logger.info(f"Raw prediction: {prediction}")
-        except Exception as e:
-            logger.error(f"Error during model prediction: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise HTTPException(status_code=500, detail=f"Model prediction error: {str(e)}")
+            # Get prediction from the model
+            with asyncio.timeout(settings.model.predict_timeout_seconds):
+                prediction = model.predict(model_input)
+        except asyncio.TimeoutError:
+            logger.error(f"Model prediction timed out after {settings.model.predict_timeout_seconds} seconds")
+            raise HTTPException(
+                status_code=503, 
+                detail=f"AI model is taking too long to respond. Please try a simpler message."
+            )
         
         # Extract the answer from the prediction
-        answer = extract_answer(prediction, context)
+        result = extract_answer(
+            prediction, 
+            context, 
+            query=sanitized_content,
+            include_confidence=True
+        )
         
         # Create assistant response
         response = ChatMessage(
             role="assistant",
-            content=answer,
+            content=result["answer"],
             intent=intent,
             timestamp=get_current_timestamp()
         )
         
+        # Log the interaction for monitoring
+        log_query_response(
+            sanitized_content, 
+            result["answer"], 
+            metadata={
+                "client_id": client_info["client_id"],
+                "session_id": session_id,
+                "intent": intent,
+                "confidence": result["confidence"],
+                "method_used": result["method_used"],
+                "processing_time": time.time() - start_time,
+                "is_code_question": is_code_query,
+                "context_used": bool(context and context != settings.ai_response.default_context),
+                "web_search_used": use_web_search
+            }
+        )
+        
         return response
+    
+    except HTTPException:
+        # Re-raise HTTP exceptions without modification
+        raise
     
     except Exception as e:
         logger.error(f"Error in chat: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
+        
+        # Log the failed interaction
+        log_query_response(
+            sanitized_content if 'sanitized_content' in locals() else "ERROR", 
+            "ERROR", 
+            metadata={
+                "client_id": client_info["client_id"],
+                "session_id": session_id,
+                "error": str(e),
+                "processing_time": time.time() - start_time
+            }
+        )
+        
+        # Return a user-friendly error message
+        error_message = settings.ai_response.fallback_responses.get("error",
+            "I encountered an error processing your message. Please try again with a different question.")
+            
+        return ChatMessage(
+            role="assistant",
+            content=error_message,
+            intent="error",
+            timestamp=get_current_timestamp()
+        )
 
 @app.get("/api/chat/{session_id}/export", response_model=Dict[str, Any])
 async def export_chat_session(session_id: str):
@@ -471,9 +730,15 @@ async def search_web(query: str) -> str:
         logger.error(f"Error searching web: {str(e)}")
         return "Error occurred while searching the web."
 
-def extract_answer(prediction: Dict[str, Any], context: str) -> str:
+from .utils.code_utils import contains_code, is_code_question, format_code_for_response
+from .utils.response_utils import enhance_response, categorize_query, log_query_response
+from .utils.search_utils import search_web
+from .utils.security_utils import validate_query, sanitize_input, rate_limit_ip_and_tokens, setup_security, get_client_info
+from .config import settings
+
+def extract_answer(prediction: Dict[str, Any], context: str, query: str = "", include_confidence: bool = True) -> Dict[str, Any]:
     """
-    Extract the answer from the model prediction.
+    Extract the answer from the model prediction and enhance it for the user.
     
     This function handles different output formats from the model:
     1. start_span/end_span indices for extractive QA
@@ -483,10 +748,21 @@ def extract_answer(prediction: Dict[str, Any], context: str) -> str:
     Args:
         prediction: The model's prediction output
         context: The context text used for the question
+        query: The original user query (for better response formatting)
+        include_confidence: Whether to include confidence scores
     
     Returns:
-        str: The extracted answer or appropriate fallback message
+        Dict with answer text, confidence level, and metadata
     """
+    # Initialize the response structure
+    response_data = {
+        "answer": "",
+        "confidence": 0.0,
+        "method_used": "unknown",
+        "context_used": bool(context and len(context) > 10),
+        "metadata": {}
+    }
+    
     try:
         # Log the raw prediction type and structure
         logger.info(f"Raw prediction type: {type(prediction)}")
@@ -498,16 +774,23 @@ def extract_answer(prediction: Dict[str, Any], context: str) -> str:
         if hasattr(prediction, 'tolist'):
             # If prediction is itself a numpy array
             prediction = prediction.tolist()
+            response_data["metadata"]["prediction_type"] = "numpy_array"
         elif isinstance(prediction, dict):
             # If prediction contains numpy arrays as values
+            response_data["metadata"]["prediction_type"] = "dict"
+            response_data["metadata"]["prediction_keys"] = list(prediction.keys())
+            
             for key, value in prediction.items():
                 if hasattr(value, 'tolist'):
                     normalized_pred[key] = value.tolist()
                 else:
                     normalized_pred[key] = value
+        else:
+            response_data["metadata"]["prediction_type"] = str(type(prediction))
         
-        # Log the normalized prediction
-        logger.info(f"Normalized prediction: {json.dumps(normalized_pred, default=str)}")
+        # Track if any method succeeded
+        extraction_succeeded = False
+        raw_answer = ""
         
         # APPROACH 1: Handle extractive QA output format (start_span/end_span)
         # This is the expected format for many BERT-based QA models
@@ -522,43 +805,56 @@ def extract_answer(prediction: Dict[str, Any], context: str) -> str:
                 end_idx = int(float(end_idx))
                 
                 logger.info(f"Extracted indices: start={start_idx}, end={end_idx}, context_length={len(context)}")
+                response_data["metadata"]["start_idx"] = start_idx
+                response_data["metadata"]["end_idx"] = end_idx
                 
                 # Validate indices
                 if 0 <= start_idx < len(context) and start_idx <= end_idx < len(context):
-                    answer = context[start_idx:end_idx+1].strip()
-                    logger.info(f"Successfully extracted answer using span indices: '{answer}'")
+                    raw_answer = context[start_idx:end_idx+1].strip()
+                    logger.info(f"Successfully extracted answer using span indices: '{raw_answer}'")
+                    
+                    # Get confidence score if available
+                    if 'start_span_probs' in prediction and 'end_span_probs' in prediction:
+                        start_prob = max(prediction['start_span_probs'])
+                        end_prob = max(prediction['end_span_probs'])
+                        confidence = (start_prob + end_prob) / 2
+                        response_data["confidence"] = float(confidence)
+                    else:
+                        response_data["confidence"] = 0.8  # Default high confidence for span-based answers
                     
                     # Return the answer if it's not empty
-                    if answer:
-                        return answer
+                    if raw_answer:
+                        extraction_succeeded = True
+                        response_data["method_used"] = "span_indices"
                 else:
                     logger.warning(f"Invalid indices: start={start_idx}, end={end_idx}, context_length={len(context)}")
             except (ValueError, TypeError, IndexError) as e:
                 logger.warning(f"Error processing start/end spans: {str(e)}")
         
         # APPROACH 2: Look for direct answer fields in the output
-        if isinstance(prediction, dict):
+        if not extraction_succeeded and isinstance(prediction, dict):
             # Common field names for answers in different models
             answer_field_names = ['answer', 'text', 'response', 'output', 'answer_text', 'prediction']
             
             for field in answer_field_names:
                 if field in prediction and isinstance(prediction[field], str) and prediction[field].strip():
-                    logger.info(f"Found answer in '{field}' field: '{prediction[field]}'")
-                    return prediction[field].strip()
+                    raw_answer = prediction[field].strip()
+                    logger.info(f"Found answer in '{field}' field: '{raw_answer}'")
+                    extraction_succeeded = True
+                    response_data["method_used"] = f"direct_field_{field}"
+                    response_data["confidence"] = 0.9  # Direct fields are usually high confidence
+                    break
         
-        # APPROACH 3: If we have a logits/probabilities output, find the most likely answer
-        if isinstance(prediction, dict) and ('logits' in prediction or 'probabilities' in prediction or 'scores' in prediction):
-            # For models that return probability distributions
-            # This would need more specific implementation based on the model's output format
-            logger.info("Model returned probability distribution, but specific handling is not implemented")
+        # APPROACH 3: If prediction is a string itself
+        if not extraction_succeeded and isinstance(prediction, str) and prediction.strip():
+            raw_answer = prediction.strip()
+            logger.info(f"Prediction is a string: '{raw_answer}'")
+            extraction_succeeded = True
+            response_data["method_used"] = "string_prediction"
+            response_data["confidence"] = 0.9
         
-        # APPROACH 4: If prediction is a string itself (rare but possible)
-        if isinstance(prediction, str) and prediction.strip():
-            logger.info(f"Prediction is a string: '{prediction}'")
-            return prediction.strip()
-        
-        # APPROACH 5: Use maximum probability token from start and end indices
-        if 'start_span_probs' in prediction and 'end_span_probs' in prediction:
+        # APPROACH 4: Use maximum probability token from start and end indices
+        if not extraction_succeeded and 'start_span_probs' in prediction and 'end_span_probs' in prediction:
             try:
                 # Try to find highest probability span
                 start_probs = prediction['start_span_probs']
@@ -568,31 +864,71 @@ def extract_answer(prediction: Dict[str, Any], context: str) -> str:
                 start_indices = sorted(range(len(start_probs)), key=lambda i: -start_probs[i])[:3]
                 end_indices = sorted(range(len(end_probs)), key=lambda i: -end_probs[i])[:3]
                 
+                best_score = 0
+                best_answer = ""
+                
                 # Try different combinations
                 for start_idx in start_indices:
                     for end_idx in end_indices:
                         if start_idx <= end_idx and end_idx < len(context):
                             answer = context[start_idx:end_idx+1].strip()
                             if answer and len(answer) > 2:  # Minimum answer length
-                                logger.info(f"Extracted answer from probabilities: '{answer}'")
-                                return answer
+                                score = (start_probs[start_idx] + end_probs[end_idx]) / 2
+                                if score > best_score:
+                                    best_score = score
+                                    best_answer = answer
+                
+                if best_answer:
+                    raw_answer = best_answer
+                    logger.info(f"Extracted answer from probabilities: '{raw_answer}'")
+                    extraction_succeeded = True
+                    response_data["method_used"] = "probability_span"
+                    response_data["confidence"] = float(best_score)
             except Exception as e:
                 logger.warning(f"Error extracting answer from probabilities: {str(e)}")
         
         # FALLBACK: Generate a response based on the context
-        if context and len(context) > 20:
+        if not extraction_succeeded and context and len(context) > 20:
             # Try to provide a meaningful response from the context
-            # Use the first 100-150 characters as a generic response
-            context_start = context[:150].strip()
-            if len(context) > 150:
+            context_start = context[:settings.ai_response.max_response_length//2].strip()
+            if len(context) > settings.ai_response.max_response_length//2:
                 context_start += "..."
                 
-            logger.info(f"Using context beginning as fallback: '{context_start}'")
-            return f"Based on the information provided: {context_start}"
+            logger.info(f"Using context beginning as fallback")
+            raw_answer = f"Based on the available information: {context_start}"
+            extraction_succeeded = True
+            response_data["method_used"] = "context_fallback"
+            response_data["confidence"] = 0.3  # Low confidence for fallbacks
+        
+        # Final fallback if all else fails
+        if not extraction_succeeded or not raw_answer:
+            logger.warning("Could not extract a good answer from model prediction")
             
-        # Final fallback
-        logger.warning("Could not extract a good answer from model prediction")
-        return "I'm unable to provide a specific answer based on the available information. Please try rephrasing your question."
+            # Check if it's a code question to provide a more specific fallback
+            if query and is_code_question(query):
+                raw_answer = settings.ai_response.fallback_responses.get("coding", 
+                    "I'm not able to generate the code for this specific request. Could you provide more details?")
+            else:
+                raw_answer = settings.ai_response.fallback_responses.get("default",
+                    "I'm unable to provide a specific answer based on the available information. Please try rephrasing your question.")
+            
+            response_data["method_used"] = "final_fallback"
+            response_data["confidence"] = 0.1  # Very low confidence
+        
+        # Set the extracted answer
+        response_data["answer"] = raw_answer
+        
+        # Enhance the response if we have the query
+        if query:
+            enhanced_answer = enhance_response(
+                raw_answer, 
+                query, 
+                intent=determine_intent(query),
+                confidence=response_data["confidence"] if include_confidence else None
+            )
+            response_data["answer"] = enhanced_answer
+        
+        return response_data
     
     except Exception as e:
         logger.error(f"Error extracting answer: {str(e)}")
@@ -600,11 +936,19 @@ def extract_answer(prediction: Dict[str, Any], context: str) -> str:
         
         # Log detailed error diagnostics
         logger.error(f"Prediction type: {type(prediction)}")
-        logger.error(f"Context length: {len(context)}")
+        logger.error(f"Context length: {len(context) if context else 0}")
         if isinstance(prediction, dict):
             logger.error(f"Prediction keys: {list(prediction.keys())}")
         
-        return "I encountered an error while processing your question. Please try again with a different phrasing."
+        # Return error response
+        error_message = settings.ai_response.fallback_responses.get("error",
+            "I encountered an error while processing your question. Please try again with a different phrasing.")
+        
+        response_data["answer"] = error_message
+        response_data["method_used"] = "error_handler"
+        response_data["confidence"] = 0.0
+        
+        return response_data
 
 def determine_intent(query: str) -> str:
     """Determine the intent of the user's query"""

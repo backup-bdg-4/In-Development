@@ -1,0 +1,102 @@
+# Backdoor AI Configuration File
+
+app_name: "Backdoor AI"
+environment: "production"  # development, testing, production
+debug: false
+version: "1.0.0"
+
+# Model Settings
+model:
+  name: "BERTSQUADFP16"
+  max_context_length: 2048
+  timeout_seconds: 30.0
+  enable_batching: false
+  batch_size: 1
+  supported_languages:
+    - "en"
+  code_languages:
+    - "python"
+    - "javascript"
+    - "typescript"
+    - "java"
+    - "c"
+    - "c++"
+    - "c#"
+    - "go"
+    - "rust"
+    - "ruby"
+    - "php"
+    - "swift"
+    - "kotlin"
+    - "html"
+    - "css"
+    - "shell"
+    - "sql"
+    - "json"
+    - "xml"
+    - "yaml"
+  preload_model: true
+  unload_after_idle_minutes: 60
+  predict_timeout_seconds: 10.0
+
+# API Settings
+api:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+  cors_origins:
+    - "*"  # In production, replace with specific domains
+  max_request_size_mb: 10.0
+  enable_rate_limiting: true
+  rate_limit_calls: 60  # 60 requests per minute by default
+  rate_limit_period: 60  # 60 second window
+
+# Web Search Settings
+web_search:
+  enabled: true
+  search_timeout_seconds: 10.0
+  max_results: 5
+  max_tokens_per_result: 200
+  user_agent: "Mozilla/5.0 (compatible; BackdoorAI/1.0; +https://github.com/backup-bdg-4)"
+  search_providers:
+    - "duckduckgo"
+  safe_search: true
+
+# Cache Settings
+cache:
+  enabled: true
+  type: "memory"  # memory, redis
+  ttl_seconds: 3600  # 1 hour
+  max_memory_mb: 100
+
+# Logging Settings
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_to_file: false
+  json_format: false
+  log_queries: true
+
+# Security Settings
+security:
+  enable_https_redirect: false  # Set to true in production
+  enable_security_headers: true
+  enable_cors: true
+  trusted_hosts:
+    - "localhost"
+    - "127.0.0.1"
+  enable_auth: false  # Set to true if implementing authentication
+
+# AI Response Settings
+ai_response:
+  min_response_length: 10
+  max_response_length: 2000
+  enable_web_search_by_default: true
+  enable_intent_detection: true
+  max_search_queries_per_conversation: 5
+  default_context: "I'll try to provide a helpful and accurate response based on my knowledge."
+  fallback_responses:
+    default: "I don't have enough information to answer that question."
+    coding: "I can help with coding questions, but I need more details to provide a specific answer."
+    sensitive: "I'm not able to provide information on that topic."
+    error: "I encountered an error processing your request. Please try again or rephrase your question."
