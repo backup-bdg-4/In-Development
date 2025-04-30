@@ -1,11 +1,43 @@
+# Core dependencies
 fastapi==0.104.1
-uvicorn==0.23.2
+uvicorn[standard]==0.23.2
 pydantic==2.4.2
 coremltools==7.0
 numpy==1.24.3
 python-multipart==0.0.6
+
+# Networking and data fetching
 requests==2.31.0
-beautifulsoup4==4.12.2
 aiohttp==3.8.6
+beautifulsoup4==4.12.2
+lxml==4.9.3  # More robust HTML parser for beautifulsoup
+httpx==0.25.0  # Modern HTTP client with async support
+
+# Environment and configuration
 python-dotenv==1.0.0
+pyyaml==6.0.1  # For configuration files
+
+# Security
+python-jose[cryptography]==3.3.0  # For JWT tokens
+passlib[bcrypt]==1.7.4  # For password hashing
+slowapi==0.1.7  # For rate limiting
+secure==0.3.0  # For security headers
+
+# Caching and performance
+redis==5.0.1  # Optional: For caching and rate limiting
+aiocache==0.12.1  # For async caching
+
+# Monitoring and observability
+prometheus-fastapi-instrumentator==6.1.0  # For metrics
+structlog==23.1.0  # Structured logging
+
+# Natural language processing and code support
+nltk==3.8.1  # Natural language toolkit for text processing
+pygments==2.16.1  # For code syntax highlighting and recognition
+tiktoken==0.5.1  # For token counting
+langdetect==1.0.9  # For language detection
+
+# Testing
+pytest==7.4.0
+pytest-asyncio==0.21.1
 
