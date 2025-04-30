@@ -52,12 +52,6 @@ out/
 *.swo
 .DS_Store
 
-# ML model files (large files)
-*.h5
-*.pb
-*.onnx
-*.tflite
-
 # Logs
 logs/
 *.log
@@ -72,3 +66,5 @@ docker-compose.override.yml
 # Render.com
 .render-buildpacks/
 
+# Don't ignore CoreML model files - we want to track these with Git LFS
+# *.mlmodel
