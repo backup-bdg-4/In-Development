@@ -72,4 +72,8 @@ RUN chmod +x /app/setup_model.sh
 EXPOSE 8000
 
 # Run the model setup and start the application
-CMD ["/bin/sh", "-c", "/app/setup_model.sh && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# Set MODEL_DATA_PATH to /tmp/model for compatibility with Render.com
+ENV MODEL_DATA_PATH=/tmp/model
+
+# Start the application with proper configuration
+CMD ["/bin/sh", "-c", "/app/setup_model.sh && MODEL_DATA_PATH=/tmp/model uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

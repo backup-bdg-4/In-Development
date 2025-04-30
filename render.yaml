@@ -11,11 +11,11 @@ services:
         value: production
       - key: LOG_LEVEL
         value: info
-      # Use both locations for redundancy
+      # Use /tmp/model for Free Tier compatibility
       - key: MODEL_DATA_PATH
-        value: /opt/render/project/src/backend/app/model
+        value: /tmp/model
       - key: BACKDOOR_MODEL_SEARCH_PATHS
-        value: "/opt/render/project/src/backend/app/model,/opt/render/project/src,/opt/render/project/src/backend,/opt/render/project,/app/app/model,/app,/tmp/model"
+        value: "/tmp/model,/app/app/model,/app/backend/app/model,/app/backend,/app"
       # Flag to indicate we're running on Render
       - key: RUNNING_ON_RENDER
         value: "true"
@@ -24,152 +24,50 @@ services:
         value: "120"
     # Using Render Free Tier (no persistent disk support)
     healthCheckPath: /
+    # Build command is supported in both Docker and Web Service runtimes
     buildCommand: |
       echo "===== BUILD STAGE (Free Tier) ====="
       
-      # Create necessary model directories (Free Tier compatible)
-      mkdir -p /tmp/model
-      mkdir -p backend/app/model
-      mkdir -p /opt/render/project/src/backend/app/model
+      # Create model directories that will be accessible
+      mkdir -p /tmp/model backend/app/model
       
-      # Display the repository structure for diagnostic information
-      echo "Repository structure:"
-      find . -name "*.mlmodel" -type f | sort
-      
-      # Try to use the model provided by GitHub Action workflow first
+      # Check for model file in repository
+      echo "Searching for model file in repository..."
       if [ -f "BERTSQUADFP16.mlmodel" ]; then
         echo "✅ Found model in repository root"
         cp BERTSQUADFP16.mlmodel /tmp/model/
         cp BERTSQUADFP16.mlmodel backend/app/model/
-        echo "✓ Copied to temp and project directories"
       elif [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
         echo "✅ Found model in backend directory"
         cp backend/BERTSQUADFP16.mlmodel /tmp/model/
-        echo "✓ Copied to temp directory"
+        cp backend/BERTSQUADFP16.mlmodel backend/app/model/
       else
         echo "⚠️ Model not found in repository, attempting to download"
         cd backend
         python download_model.py
         cd ..
         
-        # Copy downloaded model to temp directory
+        # Copy downloaded model to /tmp/model for redundancy
         if [ -f "backend/app/model/BERTSQUADFP16.mlmodel" ]; then
-          echo "✓ Copying downloaded model to temp directory"
           cp backend/app/model/BERTSQUADFP16.mlmodel /tmp/model/
         fi
       fi
       
-      # Verify the model exists in the temporary location (Free Tier)
+      # Verify the model exists
       if [ -f "/tmp/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Model successfully installed in temp location"
-        ls -la /tmp/model/
+        echo "✅ Model successfully copied to /tmp/model"
+        echo "Model size: $(du -h /tmp/model/BERTSQUADFP16.mlmodel | cut -f1)"
+      elif [ -f "backend/app/model/BERTSQUADFP16.mlmodel" ]; then
+        echo "✅ Model found in backend/app/model"
+        cp backend/app/model/BERTSQUADFP16.mlmodel /tmp/model/
+        echo "Model size: $(du -h backend/app/model/BERTSQUADFP16.mlmodel | cut -f1)"
       else
-        echo "❌ WARNING: Model not found in temp location"
-        # Try one more time with direct path
-        if [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
-          echo "⚠️ Trying direct copy again"
-          cp backend/BERTSQUADFP16.mlmodel /tmp/model/
-        fi
+        echo "⚠️ WARNING: Model file not found, application may not function correctly"
+        # One final download attempt
+        curl -L "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=ho9dyrm6&dl=1" -o /tmp/model/BERTSQUADFP16.mlmodel
       fi
-      
-      # Copy model to all important locations (Free Tier compatible)
-      echo "Ensuring model availability in all locations:"
-      for src in "BERTSQUADFP16.mlmodel" "backend/BERTSQUADFP16.mlmodel" "backend/app/model/BERTSQUADFP16.mlmodel" "/tmp/model/BERTSQUADFP16.mlmodel"; do
-        if [ -f "$src" ]; then
-          echo "Found model at $src, copying to all required locations"
-          mkdir -p /tmp/model
-          mkdir -p backend/app/model
-          mkdir -p /opt/render/project/src/backend/app/model
-          
-          # Copy to all locations (idempotent)
-          cp "$src" /tmp/model/ 2>/dev/null || echo "Could not copy to /tmp/model/"
-          cp "$src" backend/app/model/ 2>/dev/null || echo "Could not copy to backend/app/model/"
-          cp "$src" /opt/render/project/src/backend/app/model/ 2>/dev/null || echo "Could not copy to /opt/render/project/src/backend/app/model/"
-          
-          # One source found and copied is enough
-          break
-        fi
-      done
       
       echo "===== BUILD COMPLETE ====="
-      
-    startCommand: |
-      echo "===== STARTING APPLICATION (Free Tier) ====="
-      echo "Environment information:"
-      echo "ENVIRONMENT=${ENVIRONMENT}"
-      echo "MODEL_DATA_PATH=${MODEL_DATA_PATH}"
-      echo "RUNNING_ON_RENDER=${RUNNING_ON_RENDER}"
-      
-      # Ensure all model directories exist (Free Tier compatible)
-      mkdir -p /tmp/model
-      mkdir -p backend/app/model
-      mkdir -p /opt/render/project/src/backend/app/model
-      
-      # First, check all possible locations for the model file
-      found_model=0
-      model_path=""
-      
-      # Potential model locations
-      potential_paths=(
-        "/tmp/model/BERTSQUADFP16.mlmodel"
-        "backend/app/model/BERTSQUADFP16.mlmodel"
-        "backend/BERTSQUADFP16.mlmodel"
-        "BERTSQUADFP16.mlmodel"
-        "/opt/render/project/src/backend/app/model/BERTSQUADFP16.mlmodel"
-        "/opt/render/project/src/backend/BERTSQUADFP16.mlmodel"
-      )
-      
-      # Check each location and record results
-      echo "Checking for model files:"
-      for path in "${potential_paths[@]}"; do
-        if [ -f "$path" ]; then
-          echo "✅ Found model at: $path ($(du -h "$path" | cut -f1))"
-          found_model=1
-          model_path="$path"
-        else
-          echo "❌ No model at: $path"
-        fi
-      done
-      
-      # If model found, ensure it's copied to primary locations
-      if [ "$found_model" -eq "1" ]; then
-        echo "Found model at $model_path, copying to primary locations..."
-        # Free tier: prioritize /tmp/model
-        cp "$model_path" /tmp/model/BERTSQUADFP16.mlmodel 2>/dev/null || echo "Failed to copy to /tmp/model/"
-        cp "$model_path" backend/app/model/BERTSQUADFP16.mlmodel 2>/dev/null || echo "Failed to copy to backend/app/model/"
-      else
-        # Last resort: download the model again
-        echo "Model not found in any location, attempting download..."
-        cd backend
-        python download_model.py
-        cd ..
-        
-        # Check if download succeeded
-        if [ -f "backend/app/model/BERTSQUADFP16.mlmodel" ]; then
-          echo "✅ Model downloaded successfully"
-          cp backend/app/model/BERTSQUADFP16.mlmodel /tmp/model/ 2>/dev/null || echo "Failed to copy to /tmp/model/"
-        else 
-          echo "⚠️ WARNING: Model download failed or file not found"
-        fi
-      fi
-      
-      # Final verification - check if model exists in primary locations
-      if [ -f "/tmp/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Model ready in /tmp/model/ ($(du -h "/tmp/model/BERTSQUADFP16.mlmodel" | cut -f1))"
-      else
-        echo "⚠️ WARNING: Model not found in /tmp/model/"
-      fi
-      
-      if [ -f "backend/app/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Model ready in backend/app/model/ ($(du -h "backend/app/model/BERTSQUADFP16.mlmodel" | cut -f1))"
-      else
-        echo "⚠️ WARNING: Model not found in backend/app/model/"
-      fi
-      
-      echo "Starting application..."
-      cd backend
-      # Update MODEL_DATA_PATH to use /tmp/model for the free tier
-      MODEL_DATA_PATH=/tmp/model uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
   # Frontend service
   - type: web
@@ -188,4 +86,4 @@ services:
         fromService:
           name: backdoor-ai-backend
           type: web
-          property: url
+          property: hostport
