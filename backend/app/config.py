@@ -189,20 +189,52 @@ def get_settings() -> Settings:
     
     deep_update(settings_dict, env_settings)
     
-    # Special handling for model path
+    # Special handling for model path - check multiple locations
     if not settings_dict.get('model', {}).get('model_path'):
+        # Import here to avoid circular imports
+        from pathlib import Path
+        
+        # Define all possible model locations in order of preference
+        possible_locations = []
+        
+        # 1. Check environment variable (highest priority)
         model_data_path = os.environ.get('MODEL_DATA_PATH')
         if model_data_path:
-            if 'model' not in settings_dict:
-                settings_dict['model'] = {}
-            settings_dict['model']['model_path'] = os.path.join(
-                model_data_path, "BERTSQUADFP16.mlmodel"
-            )
-        else:
-            settings_dict['model'] = settings_dict.get('model', {})
-            settings_dict['model']['model_path'] = os.path.join(
+            possible_locations.append(os.path.join(model_data_path, "BERTSQUADFP16.mlmodel"))
+        
+        # 2. Check in app/model directory (standard location)
+        possible_locations.append(os.path.join(os.path.dirname(__file__), "model", "BERTSQUADFP16.mlmodel"))
+        
+        # 3. Check relative to backend directory (where GitHub Action places it)
+        backend_dir = os.path.dirname(os.path.dirname(__file__))
+        possible_locations.append(os.path.join(backend_dir, "BERTSQUADFP16.mlmodel"))
+        
+        # 4. Check for absolute /app paths (Docker container)
+        possible_locations.append("/app/app/model/BERTSQUADFP16.mlmodel")
+        possible_locations.append("/app/BERTSQUADFP16.mlmodel")
+        
+        # 5. Check the tmp directory (Render deployment)
+        possible_locations.append("/tmp/model/BERTSQUADFP16.mlmodel")
+        
+        # Use the first location that exists, or the preferred default
+        model_path = None
+        for location in possible_locations:
+            if os.path.exists(location):
+                logger.info(f"Found model at: {location}")
+                model_path = location
+                break
+        
+        # If no existing model is found, use the preferred location
+        if not model_path:
+            model_path = possible_locations[0] if possible_locations else os.path.join(
                 os.path.dirname(__file__), "model", "BERTSQUADFP16.mlmodel"
             )
+            logger.info(f"No existing model found, will use path: {model_path}")
+        
+        # Update the settings dictionary
+        if 'model' not in settings_dict:
+            settings_dict['model'] = {}
+        settings_dict['model']['model_path'] = model_path
     
     # Create Settings object
     try:

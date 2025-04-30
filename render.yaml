@@ -13,11 +13,36 @@ services:
         value: info
       - key: MODEL_DATA_PATH
         value: /tmp/model
-    # Note: Using /tmp for storage since disk is not available in free tier
-    # The app will download the model on startup if it doesn't exist
+      - key: BACKDOOR_MODEL_SEARCH_PATHS
+        value: "/tmp/model,/app,/app/app/model,/app/backend,/app/backend/app/model"
+    # Note: Using multiple possible model locations for flexibility
+    # The app will search in multiple locations for the model
     healthCheckPath: /
-    buildCommand: python download_model.py
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: |
+      mkdir -p /tmp/model
+      # Try to use the model provided by GitHub Action workflow first
+      if [ -f "BERTSQUADFP16.mlmodel" ]; then
+        echo "Using model from repository root"
+        cp BERTSQUADFP16.mlmodel /tmp/model/
+      elif [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
+        echo "Using model from backend directory"
+        cp backend/BERTSQUADFP16.mlmodel /tmp/model/
+      else
+        echo "Model not found in repository, attempting to download"
+        python download_model.py
+      fi
+      # Create all possible model directories for redundancy
+      mkdir -p app/model
+      echo "Model setup complete"
+    startCommand: |
+      echo "Starting with MODEL_DATA_PATH=${MODEL_DATA_PATH}"
+      echo "Listing possible model locations:"
+      ls -la /tmp/model/ || echo "No /tmp/model directory"
+      ls -la /app/app/model/ || echo "No /app/app/model directory"
+      ls -la /app/ || echo "No models in /app"
+      ls -la backend/ || echo "No models in backend/"
+      # Start the application
+      uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
   # Frontend service
   - type: web
