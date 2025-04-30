@@ -1,8 +1,8 @@
 services:
-  # Backend service for ML model - Using native runtime instead of Docker for build/start commands
+  # Backend service for ML model - Using native runtime instead of Docker
   - type: web
     name: backdoor-ai-backend
-    env: python # Changed from docker to python runtime
+    env: python
     buildCommand: |
       # Install backend dependencies
       pip install -r backend/requirements.txt
@@ -48,15 +48,6 @@ services:
       fi
       
       echo "===== BUILD COMPLETE ====="
-    startCommand: |
-      echo "===== STARTING APPLICATION (Free Tier) ====="
-      # Ensure model path is set correctly
-      export MODEL_DATA_PATH=/tmp/model
-      echo "MODEL_DATA_PATH set to $MODEL_DATA_PATH"
-      
-      # Start the application
-      cd backend
-      python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
     plan: free
     envVars:
       - key: ENVIRONMENT
