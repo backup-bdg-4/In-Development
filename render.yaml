@@ -1,8 +1,8 @@
 services:
-  # Backend service for ML model - Using native runtime instead of Docker for build/start commands
+  # Backend service - Using Python runtime for full build and start command support
   - type: web
     name: backdoor-ai-backend
-    env: python # Changed from docker to python runtime
+    env: python
     buildCommand: |
       # Install backend dependencies
       pip install -r backend/requirements.txt
