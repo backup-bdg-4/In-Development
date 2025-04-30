@@ -6,6 +6,11 @@ coremltools==7.0
 numpy==1.24.3
 python-multipart==0.0.6
 
+# Jupyter for model server
+jupyter==1.0.0
+notebook==7.0.6
+ipywidgets==8.1.1
+
 # Networking and data fetching
 requests==2.31.0
 aiohttp==3.8.6
@@ -21,7 +26,7 @@ pyyaml==6.0.1  # For configuration files
 python-jose[cryptography]==3.3.0  # For JWT tokens
 passlib[bcrypt]==1.7.4  # For password hashing
 slowapi==0.1.7  # For rate limiting
-secure==0.3.0  # For security headers
+# secure==0.3.0  # Removed - implementing security headers directly
 
 # Caching and performance
 redis==5.0.1  # Optional: For caching and rate limiting
