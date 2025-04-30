@@ -1,5 +1,5 @@
 services:
-  # Backend service for ML model - Using Python runtime
+  # Backend service for ML model - Using native Python runtime
   - type: web
     name: backdoor-ai-backend
     env: python
@@ -44,4 +44,53 @@ services:
       else
         echo "⚠️ WARNING: Model file not found, attempting direct download"
         # Direct download attempt
-        curl -L "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16
+        curl -L "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=ho9dyrm6&dl=1" -o /tmp/model/BERTSQUADFP16.mlmodel
+      fi
+      
+      echo "===== BUILD COMPLETE ====="
+    startCommand: |
+      echo "===== STARTING APPLICATION (Free Tier) ====="
+      # Ensure model path is set correctly
+      export MODEL_DATA_PATH=/tmp/model
+      echo "MODEL_DATA_PATH set to $MODEL_DATA_PATH"
+      
+      # Start the application
+      cd backend
+      python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      # Use /tmp/model for Free Tier compatibility
+      - key: MODEL_DATA_PATH
+        value: /tmp/model
+      - key: BACKDOOR_MODEL_SEARCH_PATHS
+        value: "/tmp/model,/app/app/model,/app/backend/app/model,/app/backend,/app"
+      # Flag to indicate we're running on Render
+      - key: RUNNING_ON_RENDER
+        value: "true"
+      # Disable model download timeout for initial load
+      - key: MODEL_LOAD_TIMEOUT
+        value: "120"
+    healthCheckPath: /
+
+  # Frontend service
+  - type: web
+    name: backdoor-ai-frontend
+    env: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    plan: free
+    envVars:
+      - key: REACT_APP_API_URL
+        fromService:
+          name: backdoor-ai-backend
+          type: web
+          property: host
+      - key: BACKEND_URL
+        fromService:
+          name: backdoor-ai-backend
+          type: web
+          property: hostport
