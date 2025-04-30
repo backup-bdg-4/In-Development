@@ -103,30 +103,33 @@ async def redirect_to_docs():
     else:
         return {"status": "healthy", "service": settings.app_name}
 
-# Determine model path from environment variable or default location
-model_data_path = os.environ.get('MODEL_DATA_PATH', None)
-if model_data_path:
-    MODEL_PATH = os.path.join(model_data_path, "BERTSQUADFP16.mlmodel")
-else:
-    MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "BERTSQUADFP16.mlmodel")
+# Import model utilities
+from .utils.model_utils import find_model_file, validate_model, ensure_model_availability
 
 # Global variable to store the loaded model
 model = None
 
-# Model status tracking
+# Find model path from best available location
+model_found, MODEL_PATH = find_model_file()
+
+# Model status tracking - enhanced with multi-path support
 model_status = {
     "loaded": False,
     "path": MODEL_PATH,
-    "exists": False,
+    "exists": model_found,
     "last_error": None,
     "load_attempts": 0,
     "last_attempt_time": None,
-    "details": {}
+    "details": {},
+    "alternate_paths": [],
+    "search_paths_checked": []
 }
 
 def load_model(force_reload=False):
     """
     Load the CoreML model for inference.
+    This enhanced version checks multiple possible locations for the model file
+    and copies the model between locations if needed for redundancy.
     
     Args:
         force_reload (bool): If True, reload the model even if it's already loaded
@@ -145,16 +148,26 @@ def load_model(force_reload=False):
         logger.info("Model already loaded, skipping load")
         return True
     
-    # Check if model file exists
-    model_status["exists"] = os.path.exists(MODEL_PATH)
+    # First, ensure model is available using our enhanced model utilities
+    model_availability = ensure_model_availability()
     
-    # If model doesn't exist, show clear error message
-    if not model_status["exists"]:
+    # Update status
+    model_status["exists"] = model_availability["found"]
+    model_status["path"] = model_availability.get("source_path", MODEL_PATH)
+    
+    # Store all paths we checked
+    if "copied_to" in model_availability:
+        model_status["alternate_paths"] = model_availability["copied_to"]
+    
+    # If model availability check failed, show clear error message
+    if not model_availability["success"]:
         error_msg = f"""
 =================================================================
-ERROR: CoreML model file not found at {MODEL_PATH}
+ERROR: CoreML model file not available
 =================================================================
-The model file should be placed at the location above.
+The model file could not be found in any of these locations:
+- {MODEL_PATH} (primary location)
+- {', '.join(model_status.get('search_paths_checked', []))}
 
 This model file should be stored using Git LFS in the repository.
 If you're not seeing the file, make sure:
@@ -163,44 +176,44 @@ If you're not seeing the file, make sure:
 2. You've pulled the repository with Git LFS enabled:
    git lfs pull
 
-If you have the model file separately, copy it to the path above.
+Error details: {model_availability.get('error', 'Unknown error')}
 =================================================================
 """
         logger.error(error_msg)
-        model_status["last_error"] = f"Model file not found at {MODEL_PATH}. Please ensure the CoreML model is properly installed."
-        return False
-    
-    # Model file exists, verify it using check_model
-    try:
-        # Add the parent directory to sys.path to import check_model
-        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if parent_dir not in sys.path:
-            sys.path.append(parent_dir)
-            
-        from download_model import check_model
+        model_status["last_error"] = f"Model file not found. Please ensure the CoreML model is properly installed."
         
-        # Check if the model is valid
-        logger.info(f"Verifying model at {MODEL_PATH}...")
-        if not check_model():
-            error_msg = "Model verification failed. The model file exists but may be corrupted."
-            logger.error(error_msg)
-            model_status["last_error"] = error_msg
-            return False
+        # Try downloading the model as a last resort
+        try:
+            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if parent_dir not in sys.path:
+                sys.path.append(parent_dir)
+                
+            from download_model import download_model
             
-        logger.info("Model verification successful, now loading...")
+            logger.info("Attempting to download model...")
+            if download_model():
+                logger.info("Model downloaded successfully, retrying model availability check")
+                model_availability = ensure_model_availability()
+                
+                if model_availability["success"]:
+                    model_status["path"] = model_availability["source_path"]
+                    model_status["exists"] = True
+                    model_status["alternate_paths"] = model_availability.get("copied_to", [])
+                else:
+                    logger.error("Model downloaded but still not available")
+                    return False
+            else:
+                logger.error("Failed to download model")
+                return False
+        except ImportError:
+            logger.error("Could not import download_model module")
+            return False
+        except Exception as e:
+            logger.error(f"Error during model download: {str(e)}")
+            return False
     
-    except ImportError as e:
-        error_msg = f"Could not import model verification module: {str(e)}"
-        logger.error(error_msg)
-        model_status["last_error"] = error_msg
-        return False
-    
-    except Exception as e:
-        error_msg = f"Unexpected error during model verification: {str(e)}"
-        logger.error(error_msg)
-        logger.error(traceback.format_exc())
-        model_status["last_error"] = error_msg
-        return False
+    # Now that we have ensured model availability, continue with loading
+    model_path = model_status["path"]
     
     # Load the ML model
     try:
@@ -208,7 +221,7 @@ If you have the model file separately, copy it to the path above.
         if model is not None:
             model = None
         
-        logger.info(f"Loading model from {MODEL_PATH}")
+        logger.info(f"Loading model from {model_path}")
         
         # Try importing coremltools if not already imported
         try:
@@ -221,7 +234,7 @@ If you have the model file separately, copy it to the path above.
         
         # Load the model
         start_time = time.time()
-        model = ct.models.MLModel(MODEL_PATH)
+        model = ct.models.MLModel(model_path)
         load_time = time.time() - start_time
         
         # Get model details
@@ -233,7 +246,8 @@ If you have the model file separately, copy it to the path above.
             "author": spec.description.metadata.author if hasattr(spec.description.metadata, "author") else "Unknown",
             "load_time_sec": load_time,
             "inputs": [input_desc.name for input_desc in spec.description.input],
-            "outputs": [output_desc.name for output_desc in spec.description.output]
+            "outputs": [output_desc.name for output_desc in spec.description.output],
+            "size_mb": os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0
         }
         
         logger.info(f"Model loaded successfully in {load_time:.2f} seconds")
@@ -253,6 +267,12 @@ If you have the model file separately, copy it to the path above.
         # Update status
         model_status["loaded"] = True
         model_status["last_error"] = None
+        
+        # Log the full success details including all paths
+        logger.info(f"Model loaded from: {model_path}")
+        if model_status.get("alternate_paths"):
+            logger.info(f"Model also available at: {', '.join(model_status['alternate_paths'])}")
+        
         return True
     
     except Exception as e:
@@ -349,27 +369,80 @@ class ChatSession(BaseModel):
 @app.get("/")
 async def root():
     """
-    Health check endpoint with detailed model status information.
-    This provides diagnostics that help the frontend understand
-    the status of the model and what might be wrong.
+    Enhanced health check endpoint with comprehensive model status information.
+    This provides detailed diagnostics to help troubleshoot model loading issues
+    across different deployment environments (Docker, Render, local development).
     """
     global model, model_loaded, model_status
+    
+    # Run a fresh model path check to see all available locations
+    model_found, current_path = find_model_file()
+    all_locations = []
+    
+    # Check if paths have changed since last load
+    if current_path != model_status["path"] and model_found:
+        logger.info(f"Model location changed from {model_status['path']} to {current_path}")
+        model_status["path"] = current_path
+        model_status["exists"] = model_found
+    
+    # Gather all possible model locations for diagnostics
+    search_paths = []
+    # 1. Check environment variable paths
+    model_data_path = os.environ.get('MODEL_DATA_PATH')
+    if model_data_path:
+        search_paths.append(os.path.join(model_data_path, "BERTSQUADFP16.mlmodel"))
+    
+    # 2. Check additional search paths from environment
+    if os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS'):
+        for path in os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS', '').split(','):
+            if path.strip():
+                search_paths.append(os.path.join(path.strip(), "BERTSQUADFP16.mlmodel"))
+    
+    # 3. Add standard locations
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    search_paths.append(os.path.join(app_dir, "model", "BERTSQUADFP16.mlmodel"))
+    search_paths.append(os.path.join(os.path.dirname(app_dir), "BERTSQUADFP16.mlmodel"))
+    search_paths.append("/app/app/model/BERTSQUADFP16.mlmodel")
+    search_paths.append("/tmp/model/BERTSQUADFP16.mlmodel")
+    
+    # Report on all model locations
+    for path in search_paths:
+        exists = os.path.exists(path)
+        size = os.path.getsize(path) / (1024 * 1024) if exists else 0
+        all_locations.append({
+            "path": path,
+            "exists": exists,
+            "size_mb": round(size, 2) if exists else 0,
+            "current": path == model_status["path"]
+        })
     
     # Try to reload the model if it's not loaded
     if model is None and not model_status["loaded"] and not model_loaded:
         logger.info("Model not loaded, attempting to load in health check")
         model_loaded = load_model()
     
-    # Prepare status response
+    # Prepare enhanced status response
     response = {
         "status": "healthy" if model_status["loaded"] else "degraded",
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "environment": settings.environment,
         "model": {
             "loaded": model_status["loaded"],
-            "file_exists": os.path.exists(MODEL_PATH),
-            "path": MODEL_PATH,
+            "current_path": model_status["path"],
+            "file_exists": model_status["exists"],
             "load_attempts": model_status["load_attempts"],
             "last_attempt": model_status["last_attempt_time"],
+            "alternate_paths": model_status.get("alternate_paths", []),
+            "all_locations": all_locations
+        },
+        "diagnostics": {
+            "deployment_info": {
+                "model_data_path_env": model_data_path or "Not set",
+                "search_paths_env": os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS', "Not set"),
+                "environment": settings.environment,
+                "app_directory": app_dir,
+                "running_in_docker": os.path.exists("/.dockerenv") or os.environ.get("RUNNING_IN_DOCKER") == "true"
+            }
         },
         "api_version": "1.0.0"
     }
@@ -377,6 +450,21 @@ async def root():
     # If we have an error, include it
     if model_status["last_error"]:
         response["model"]["error"] = model_status["last_error"]
+        
+        # Add troubleshooting suggestions based on the error
+        if "not found" in model_status["last_error"].lower():
+            response["diagnostics"]["suggestions"] = [
+                "Ensure the model file is downloaded and available at one of the search paths",
+                "Check if the GitHub Action workflow has successfully run",
+                "Verify that Git LFS is properly configured and the model file is being tracked",
+                "Try copying the model file manually to /tmp/model/ or /app/app/model/"
+            ]
+        elif "load" in model_status["last_error"].lower():
+            response["diagnostics"]["suggestions"] = [
+                "Verify the model file is not corrupted",
+                "Check if coremltools is properly installed",
+                "Ensure the server has sufficient memory to load the model"
+            ]
     
     # Include model details if available
     if model_status["details"]:

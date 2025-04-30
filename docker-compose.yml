@@ -9,17 +9,43 @@ services:
       - "8000:8000"
     volumes:
       - model-data:/app/app/model
+      - tmp-model-data:/tmp/model
     environment:
       - ENVIRONMENT=development
       - LOG_LEVEL=info
       - MODEL_DATA_PATH=/app/app/model
+      - BACKDOOR_MODEL_SEARCH_PATHS=/app/app/model,/app,/tmp/model,/app/backend,/app/backend/app/model
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      test: [
+        "CMD-SHELL", 
+        "curl -f http://localhost:8000/ || exit 1"
+      ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    command: >
+      bash -c "
+        echo 'Setting up model and starting server...' &&
+        mkdir -p /app/app/model /tmp/model &&
+        if [ -f /app/backend/BERTSQUADFP16.mlmodel ]; then
+          echo 'Found model in backend directory' &&
+          cp /app/backend/BERTSQUADFP16.mlmodel /app/app/model/ &&
+          cp /app/backend/BERTSQUADFP16.mlmodel /tmp/model/;
+        elif [ -f /app/BERTSQUADFP16.mlmodel ]; then
+          echo 'Found model in app directory' &&
+          cp /app/BERTSQUADFP16.mlmodel /app/app/model/ &&
+          cp /app/BERTSQUADFP16.mlmodel /tmp/model/;
+        else
+          echo 'Running download_model.py' &&
+          python download_model.py;
+        fi &&
+        echo 'Model locations:' &&
+        find / -name 'BERTSQUADFP16.mlmodel' 2>/dev/null | grep -v Permission &&
+        echo 'Starting server' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000
+      "
 
   # Frontend service
   frontend:
@@ -35,4 +61,6 @@ services:
 
 volumes:
   model-data:
+    driver: local
+  tmp-model-data:
     driver: local

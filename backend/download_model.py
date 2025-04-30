@@ -23,13 +23,47 @@ MODEL_INFO = {
 
 # Define model paths
 def get_model_path() -> str:
-    """Get the path to the model file"""
-    # Get the model path from environment variable or use default
+    """
+    Get the path to the model file by checking multiple possible locations.
+    This function handles different deployment environments (local dev, Docker, Render, etc.).
+    
+    Returns:
+        str: Path to the model file (preferred location if multiple exist)
+    """
+    # Define all possible model locations in order of preference
+    possible_locations = []
+    
+    # 1. Check environment variable (highest priority)
     model_data_path = os.environ.get('MODEL_DATA_PATH', None)
     if model_data_path:
-        return os.path.join(model_data_path, "BERTSQUADFP16.mlmodel")
-    else:
-        return os.path.join(os.path.dirname(__file__), "app", "model", "BERTSQUADFP16.mlmodel")
+        possible_locations.append(os.path.join(model_data_path, "BERTSQUADFP16.mlmodel"))
+    
+    # 2. Check in app/model directory (standard location)
+    possible_locations.append(os.path.join(os.path.dirname(__file__), "app", "model", "BERTSQUADFP16.mlmodel"))
+    
+    # 3. Check in backend directory (where GitHub Action places it)
+    possible_locations.append(os.path.join(os.path.dirname(__file__), "BERTSQUADFP16.mlmodel"))
+    
+    # 4. Check for absolute /app paths (Docker container)
+    possible_locations.append("/app/app/model/BERTSQUADFP16.mlmodel")
+    possible_locations.append("/app/BERTSQUADFP16.mlmodel")
+    
+    # 5. Check the tmp directory (Render deployment)
+    possible_locations.append("/tmp/model/BERTSQUADFP16.mlmodel")
+    
+    # Return the first location that exists
+    for location in possible_locations:
+        if os.path.exists(location):
+            logger.info(f"Found model at: {location}")
+            return location
+    
+    # If we get here, no existing locations were found
+    # Return the preferred location (we'll try to get/download the model there)
+    preferred_location = possible_locations[0] if possible_locations else os.path.join(
+        os.path.dirname(__file__), "app", "model", "BERTSQUADFP16.mlmodel"
+    )
+    logger.info(f"No existing model found, will use path: {preferred_location}")
+    return preferred_location
 
 def validate_model(model_path: str) -> Tuple[bool, Dict[str, Any]]:
     """
