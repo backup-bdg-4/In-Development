@@ -1,34 +1,14 @@
 services:
-  # Backend service for ML model
+  # Backend service for ML model - Using native runtime instead of Docker for build/start commands
   - type: web
     name: backdoor-ai-backend
-    env: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    plan: free
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: LOG_LEVEL
-        value: info
-      # Use /tmp/model for Free Tier compatibility
-      - key: MODEL_DATA_PATH
-        value: /tmp/model
-      - key: BACKDOOR_MODEL_SEARCH_PATHS
-        value: "/tmp/model,/app/app/model,/app/backend/app/model,/app/backend,/app"
-      # Flag to indicate we're running on Render
-      - key: RUNNING_ON_RENDER
-        value: "true"
-      # Disable model download timeout for initial load
-      - key: MODEL_LOAD_TIMEOUT
-        value: "120"
-    # Using Render Free Tier (no persistent disk support)
-    healthCheckPath: /
-    # Build command is supported in both Docker and Web Service runtimes
+    env: python # Changed from docker to python runtime
     buildCommand: |
-      echo "===== BUILD STAGE (Free Tier) ====="
+      # Install backend dependencies
+      pip install -r backend/requirements.txt
       
-      # Create model directories that will be accessible
+      echo "===== BUILD STAGE (Free Tier) ====="
+      # Create model directories
       mkdir -p /tmp/model backend/app/model
       
       # Check for model file in repository
@@ -62,12 +42,39 @@ services:
         cp backend/app/model/BERTSQUADFP16.mlmodel /tmp/model/
         echo "Model size: $(du -h backend/app/model/BERTSQUADFP16.mlmodel | cut -f1)"
       else
-        echo "⚠️ WARNING: Model file not found, application may not function correctly"
-        # One final download attempt
+        echo "⚠️ WARNING: Model file not found, attempting direct download"
+        # Direct download attempt
         curl -L "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=ho9dyrm6&dl=1" -o /tmp/model/BERTSQUADFP16.mlmodel
       fi
       
       echo "===== BUILD COMPLETE ====="
+    startCommand: |
+      echo "===== STARTING APPLICATION (Free Tier) ====="
+      # Ensure model path is set correctly
+      export MODEL_DATA_PATH=/tmp/model
+      echo "MODEL_DATA_PATH set to $MODEL_DATA_PATH"
+      
+      # Start the application
+      cd backend
+      python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      # Use /tmp/model for Free Tier compatibility
+      - key: MODEL_DATA_PATH
+        value: /tmp/model
+      - key: BACKDOOR_MODEL_SEARCH_PATHS
+        value: "/tmp/model,/app/app/model,/app/backend/app/model,/app/backend,/app"
+      # Flag to indicate we're running on Render
+      - key: RUNNING_ON_RENDER
+        value: "true"
+      # Disable model download timeout for initial load
+      - key: MODEL_LOAD_TIMEOUT
+        value: "120"
+    healthCheckPath: /
 
   # Frontend service
   - type: web
