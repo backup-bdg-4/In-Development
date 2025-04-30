@@ -126,7 +126,7 @@ export const chatService = {
     }
   },
   
-  // Check if the backend is available and model is loaded
+  // Check if the backend is available and Jupyter model server is running
   checkHealth: async () => {
     try {
       const response = await api.get('/');
@@ -136,10 +136,9 @@ export const chatService = {
       const healthStatus = {
         isHealthy: response.data.status === 'healthy',
         modelLoaded: response.data.model?.loaded === true,
-        modelExists: response.data.model?.file_exists === true,
+        jupyterServerRunning: response.data.model?.jupyter_server === 'running',
         errorMessage: response.data.model?.error || null,
         lastAttempt: response.data.model?.last_attempt || null,
-        modelDetails: response.data.model?.details || null,
         timestamp: response.data.timestamp
       };
       
@@ -148,17 +147,14 @@ export const chatService = {
         console.warn('Backend reports degraded status');
       }
       
-      if (!healthStatus.modelLoaded) {
-        console.warn('Model is not loaded on the backend');
-        if (healthStatus.errorMessage) {
-          console.error('Model load error:', healthStatus.errorMessage);
-        }
+      if (!healthStatus.jupyterServerRunning) {
+        console.warn('Jupyter model server is not running');
       }
       
       // Store health status for reference
       window.backdoorAIStatus = healthStatus;
       
-      return healthStatus.modelLoaded && healthStatus.isHealthy;
+      return healthStatus.jupyterServerRunning && healthStatus.isHealthy;
     } catch (error) {
       console.error('Backend health check failed:', error);
       
@@ -166,6 +162,7 @@ export const chatService = {
       window.backdoorAIStatus = {
         isHealthy: false,
         modelLoaded: false,
+        jupyterServerRunning: false,
         connectionError: error.message || 'Connection to backend failed',
         timestamp: new Date().toISOString()
       };

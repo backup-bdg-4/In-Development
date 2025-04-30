@@ -31,6 +31,7 @@ try:
     from .utils.jupyter_model_server import (
         initialize_model_server, 
         predict_with_jupyter, 
+        predict_with_jupyter_server,
         shutdown_jupyter_server,
         is_jupyter_server_running
     )
@@ -170,45 +171,14 @@ async def startup_event():
         except Exception as e:
             logger.warning(f"Failed to perform garbage collection: {e}")
     else:
-        # Check initial model status
-        global model, model_loaded
-        
-        # In memory-saving mode, don't pre-load the model
-        if memory_saving_mode:
-            logger.info("Memory-saving mode: Model will be loaded on first request (lazy loading)")
-            # Force garbage collection to free memory
-            try:
-                gc.collect()
-                logger.info("Memory-saving mode: Garbage collection performed")
-            except Exception as e:
-                logger.warning(f"Failed to perform garbage collection: {e}")
-        else:
-            # Standard mode - pre-load the model
-            if model_loaded:
-                logger.info("Model pre-loaded successfully")
-            else:
-                logger.warning("Model will be loaded on first request")
-                
-                # Try to pre-load the model asynchronously
-                import threading
-                
-                def preload_model_thread():
-                    try:
-                        global model, model_loaded
-                        logger.info("Starting asynchronous model pre-loading")
-                        model_loaded = load_model()
-                        if model_loaded:
-                            logger.info("Model pre-loaded successfully in background thread")
-                        else:
-                            logger.error("Failed to pre-load model in background thread")
-                    except Exception as e:
-                        logger.error(f"Error in model pre-loading thread: {str(e)}")
-                
-                # Start pre-loading in a background thread to avoid blocking startup
-                preload_thread = threading.Thread(target=preload_model_thread)
-                preload_thread.daemon = True
-                preload_thread.start()
-                logger.info("Started background thread for model pre-loading")
+        # Force garbage collection to free memory
+        try:
+            gc.collect()
+            logger.info("Memory-saving mode: Garbage collection performed")
+        except Exception as e:
+            logger.warning(f"Failed to perform garbage collection: {e}")
+            
+        logger.warning("Standard model loading is disabled. Please use Jupyter model server.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -224,13 +194,7 @@ async def shutdown_event():
             logger.error(f"Error shutting down Jupyter model server: {str(e)}")
     else:
         # Clear any global resources
-        if 'model' in globals() and model is not None:
-            try:
-                global model
-                model = None
-                logger.info("Model released from memory")
-            except Exception as e:
-                logger.error(f"Error releasing model: {e}")
+        logger.info("No Jupyter server to shut down")
     
     # Force garbage collection to free memory
     try:
@@ -250,17 +214,11 @@ async def redirect_to_docs():
 # Import model utilities
 from .utils.model_utils import find_model_file, validate_model, ensure_model_availability
 
-# Global variable to store the loaded model
-model = None
-
-# Find model path from best available location
-model_found, MODEL_PATH = find_model_file()
-
-# Model status tracking - enhanced with multi-path support
+# Model status tracking
 model_status = {
-    "loaded": False,
-    "path": MODEL_PATH,
-    "exists": model_found,
+    "loaded": True,
+    "path": os.environ.get('MODEL_DATA_PATH', '/tmp/model'),
+    "exists": True,
     "last_error": None,
     "load_attempts": 0,
     "last_attempt_time": None,
@@ -271,301 +229,67 @@ model_status = {
 
 def load_model(force_reload=False):
     """
-    Load the CoreML model for inference.
-    Memory-efficient version with lazy loading and garbage collection.
+    Placeholder function for compatibility.
+    With Jupyter model server, we do not need to load the model in the main application.
     
     Args:
-        force_reload (bool): If True, reload the model even if it's already loaded
+        force_reload (bool): Not used
         
     Returns:
-        bool: True if model loaded successfully, False otherwise
+        bool: Always returns True
     """
-    global model, model_status
+    global model_status
     
-    # Check if we're in memory-saving mode
-    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
-    running_on_render = os.environ.get('RUNNING_ON_RENDER') == 'true'
-    memory_saving_mode = minimize_memory or running_on_render
-    
-    # Track attempt
+    # Track attempt for compatibility
     model_status["load_attempts"] += 1
     model_status["last_attempt_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # If model is already loaded and no force reload, return True
-    if model is not None and not force_reload:
-        logger.info("Model already loaded, skipping load")
-        return True
-    
-    # Force garbage collection before loading model
-    if memory_saving_mode:
-        try:
-            import gc
-            gc.collect()
-            logger.info("Memory-saving mode: Garbage collection performed before model loading")
-        except Exception as e:
-            logger.warning(f"Failed to perform garbage collection: {e}")
-    
-    # First, ensure model is available using our enhanced model utilities
-    # This will use memory-saving mode if enabled
-    model_availability = ensure_model_availability()
-    
     # Update status
-    model_status["exists"] = model_availability["found"]
-    model_status["path"] = model_availability.get("source_path", MODEL_PATH)
-    model_status["memory_saving_mode"] = memory_saving_mode
+    model_status["exists"] = True
+    model_status["path"] = os.environ.get("MODEL_DATA_PATH", "/tmp/model")
+    model_status["memory_saving_mode"] = True
+    model_status["loaded"] = True
+    model_status["load_time"] = 0
+    model_status["last_loaded"] = time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # Store all paths we checked
-    if "copied_to" in model_availability:
-        model_status["alternate_paths"] = model_availability["copied_to"]
-    
-    # If model availability check failed, show clear error message
-    if not model_availability["success"]:
-        error_msg = f"""
-=================================================================
-ERROR: CoreML model file not available
-=================================================================
-The model file could not be found in any of these locations:
-- {MODEL_PATH} (primary location)
-- {', '.join(model_status.get('search_paths_checked', []))}
+    logger.info("Using Jupyter model server - model loading handled by server")
+    return True
 
-This model file should be stored using Git LFS in the repository.
-If you're not seeing the file, make sure:
+# Initialize model status
+load_model()
 
-1. You have Git LFS installed: https://git-lfs.github.com
-2. You've pulled the repository with Git LFS enabled:
-   git lfs pull
-
-Error details: {model_availability.get('error', 'Unknown error')}
-=================================================================
-"""
-        logger.error(error_msg)
-        model_status["last_error"] = f"Model file not found. Please ensure the CoreML model is properly installed."
-        
-        # Try downloading the model as a last resort
-        try:
-            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if parent_dir not in sys.path:
-                sys.path.append(parent_dir)
-                
-            from download_model import download_model
-            
-            logger.info("Attempting to download model...")
-            if download_model():
-                logger.info("Model downloaded successfully, retrying model availability check")
-                model_availability = ensure_model_availability()
-                
-                if model_availability["success"]:
-                    model_status["path"] = model_availability["source_path"]
-                    model_status["exists"] = True
-                    model_status["alternate_paths"] = model_availability.get("copied_to", [])
-                else:
-                    logger.error("Model downloaded but still not available")
-                    return False
-            else:
-                logger.error("Failed to download model")
-                return False
-        except ImportError:
-            logger.error("Could not import download_model module")
-            return False
-        except Exception as e:
-            logger.error(f"Error during model download: {str(e)}")
-            return False
-    
-    # Now that we have ensured model availability, continue with loading
-    model_path = model_status["path"]
-    
-    # Load the ML model
-    try:
-        # Clear any previous model from memory
-        if model is not None:
-            model = None
-            # Force garbage collection to free memory
-            if memory_saving_mode:
-                try:
-                    import gc
-                    gc.collect()
-                    logger.info("Memory-saving mode: Cleared previous model and performed garbage collection")
-                except Exception as e:
-                    logger.warning(f"Failed to perform garbage collection: {e}")
-        
-        logger.info(f"Loading model from {model_path}")
-        
-        # Try importing coremltools if not already imported
-        try:
-            import coremltools as ct
-        except ImportError as e:
-            error_msg = f"Failed to import coremltools: {str(e)}"
-            logger.error(error_msg)
-            model_status["last_error"] = error_msg
-            return False
-        
-        # Load the model
-        start_time = time.time()
-        model = ct.models.MLModel(model_path)
-        load_time = time.time() - start_time
-        
-        # Get model details - in memory-saving mode, get minimal details
-        if memory_saving_mode:
-            # Store minimal model metadata to save memory
-            model_status["details"] = {
-                "description": "Minimal details in memory-saving mode",
-                "load_time_sec": load_time,
-                "size_mb": os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0,
-                "memory_saving_mode": memory_saving_mode
-            }
-            logger.info("Memory-saving mode: Using minimal model metadata")
-        else:
-            # Standard mode - get full details
-            spec = model.get_spec()
-            model_status["details"] = {
-                "description": spec.description.metadata.shortDescription if hasattr(spec.description.metadata, "shortDescription") else "Unknown",
-                "author": spec.description.metadata.author if hasattr(spec.description.metadata, "author") else "Unknown",
-                "load_time_sec": load_time,
-                "inputs": [input_desc.name for input_desc in spec.description.input],
-                "outputs": [output_desc.name for output_desc in spec.description.output],
-                "size_mb": os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0,
-                "memory_saving_mode": memory_saving_mode
-            }
-        
-        logger.info(f"Model loaded successfully in {load_time:.2f} seconds")
-        
-        # Only log detailed info if not in memory-saving mode
-        if not memory_saving_mode:
-            logger.info(f"Model description: {model_status['details'].get('description', 'Unknown')}")
-            if 'inputs' in model_status['details']:
-                logger.info(f"Model inputs: {model_status['details']['inputs']}")
-            if 'outputs' in model_status['details']:
-                logger.info(f"Model outputs: {model_status['details']['outputs']}")
-        
-        # Test model with a simple prediction
-        test_success = _test_model_basic_prediction()
-        if not test_success:
-            error_msg = "Model loaded but failed basic prediction test"
-            logger.error(error_msg)
-            model_status["last_error"] = error_msg
-            model_status["loaded"] = False
-            return False
-        
-        # Update status
-        model_status["loaded"] = True
-        model_status["last_error"] = None
-        
-        # Log the full success details including all paths
-        logger.info(f"Model loaded from: {model_path}")
-        if model_status.get("alternate_paths"):
-            logger.info(f"Model also available at: {', '.join(model_status['alternate_paths'])}")
-        
-        # Force garbage collection after successful load in memory-saving mode
-        if memory_saving_mode:
-            try:
-                import gc
-                gc.collect()
-                logger.info("Memory-saving mode: Garbage collection performed after model loading")
-            except Exception as e:
-                logger.warning(f"Failed to perform garbage collection: {e}")
-        
-        return True
-    
-    except Exception as e:
-        error_msg = f"Error loading model: {str(e)}"
-        logger.error(error_msg)
-        logger.error(traceback.format_exc())
-        model_status["last_error"] = error_msg
-        model_status["loaded"] = False
-        return False
-
-def _test_model_basic_prediction():
-    """
-    Test the model with a basic prediction to ensure it's working correctly.
-    Memory-efficient version that minimizes logging and cleans up after testing.
-    
-    Returns:
-        bool: True if prediction succeeds, False otherwise
-    """
-    global model
-    
-    # Check if we're in memory-saving mode
-    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
-    running_on_render = os.environ.get('RUNNING_ON_RENDER') == 'true'
-    memory_saving_mode = minimize_memory or running_on_render
-    
-    if model is None:
-        logger.error("Cannot test model - model not loaded")
-        return False
-    
-    try:
-        # Create a simple test input (minimal size)
-        test_input = {
-            'query_text': 'Test?',
-            'passage_text': 'This is a test.'
-        }
-        
-        # Try a prediction
-        if memory_saving_mode:
-            logger.info("Memory-saving mode: Performing minimal model test")
-        else:
-            logger.info("Testing model with basic prediction")
-            
-        prediction = model.predict(test_input)
-        
-        # Check if prediction has expected format
-        if isinstance(prediction, dict) and prediction:
-            if memory_saving_mode:
-                logger.info("Memory-saving mode: Model test successful")
-            else:
-                logger.info("Basic model prediction successful")
-                
-            # Clean up prediction data to free memory
-            prediction = None
-            
-            # Force garbage collection in memory-saving mode
-            if memory_saving_mode:
-                try:
-                    import gc
-                    gc.collect()
-                    logger.info("Memory-saving mode: Garbage collection performed after test prediction")
-                except Exception as e:
-                    logger.warning(f"Failed to perform garbage collection: {e}")
-                
-            return True
-        else:
-            logger.error(f"Unexpected prediction format: {type(prediction)}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Error during model test prediction: {str(e)}")
-        if not memory_saving_mode:
-            logger.error(traceback.format_exc())
-        return False
-
-# Load the model on startup
-model_loaded = load_model()
-
-# Schedule periodic model checks
+# Schedule periodic Jupyter server checks
 def schedule_model_checks():
-    """Schedule periodic checks to ensure model is loaded"""
+    """Schedule periodic checks to ensure Jupyter model server is running"""
     import threading
     
-    def check_model():
-        global model, model_loaded, model_status
+    def check_jupyter_server():
+        global model_status
         
-        # If model is not loaded, try to reload it
-        if model is None or not model_status["loaded"]:
-            logger.info("Scheduled check: Attempting to reload model")
-            model_loaded = load_model()
+        # Check if Jupyter server is running
+        if JUPYTER_MODEL_SERVER_AVAILABLE:
+            try:
+                server_running = is_jupyter_server_running()
+                if not server_running:
+                    logger.warning("Jupyter model server not running, attempting to initialize")
+                    initialize_model_server()
+            except Exception as e:
+                logger.error(f"Error checking Jupyter server status: {str(e)}")
         
         # Schedule the next check
-        check_timer = threading.Timer(300, check_model)  # Check every 5 minutes
+        check_timer = threading.Timer(300, check_jupyter_server)  # Check every 5 minutes
         check_timer.daemon = True
         check_timer.start()
     
     # Start the first check
-    initial_timer = threading.Timer(60, check_model)  # First check after 1 minute
+    initial_timer = threading.Timer(60, check_jupyter_server)  # First check after 1 minute
     initial_timer.daemon = True
     initial_timer.start()
+    logger.info("Started periodic checks for Jupyter model server")
 
 # Start the scheduled checks
-schedule_model_checks()
+if JUPYTER_MODEL_SERVER_AVAILABLE:
+    schedule_model_checks()
 
 # Define request and response models
 class QueryRequest(BaseModel):
@@ -587,171 +311,50 @@ class ChatSession(BaseModel):
 @app.get("/")
 async def root():
     """
-    Enhanced health check endpoint with comprehensive model status information.
-    This provides detailed diagnostics to help troubleshoot model loading issues
-    across different deployment environments (Docker, Render, local development).
+    Health check endpoint with Jupyter model server status information.
     """
-    global model, model_loaded, model_status
+    global model_status
     
     # Track execution time of the health check
     health_check_start = time.time()
     
-    # 1. Get initialization information from app state
+    # Get initialization information from app state
     init_info = getattr(app.state, 'init_result', {})
     
-    # 2. Run a fresh model path check for latest information
-    from .utils.model_utils import find_model_file, ensure_model_availability
+    # Get environment information
     from .utils.initialization import detect_environment
-    
-    # Get detailed environment information
     env_info = detect_environment()
     
-    # Check model locations
-    model_found, current_path = find_model_file()
-    
-    # Update model status if paths have changed
-    if current_path != model_status["path"] and model_found:
-        logger.info(f"Model location changed from {model_status['path']} to {current_path}")
-        model_status["path"] = current_path
-        model_status["exists"] = model_found
-    
-    # Gather all model locations for comprehensive diagnostics
-    all_model_locations = []
-    
-    # Get filesystem search results for the model
-    model_files_found = []
-    try:
-        import subprocess
-        if env_info.get("in_docker") or env_info.get("on_render"):
-            # In container environments, use find command for broader search
-            find_cmd = "find / -name 'BERTSQUADFP16.mlmodel' -type f 2>/dev/null | grep -v 'Permission denied'"
-            result = subprocess.run(find_cmd, shell=True, capture_output=True, text=True)
-            if result.stdout:
-                model_files_found = result.stdout.strip().split('\n')
-        else:
-            # In local development, search common directories
-            search_dirs = [
-                os.getcwd(),
-                os.path.dirname(os.getcwd()),
-                os.path.join(os.getcwd(), "backend"),
-                os.path.join(os.getcwd(), "backend", "app"),
-                os.path.join(os.getcwd(), "backend", "app", "model")
-            ]
-            for d in search_dirs:
-                for root, _, files in os.walk(d):
-                    if "BERTSQUADFP16.mlmodel" in files:
-                        model_files_found.append(os.path.join(root, "BERTSQUADFP16.mlmodel"))
-    except Exception as e:
-        logger.error(f"Error searching for model files: {str(e)}")
-    
-    # Get all potential model locations
-    all_potential_paths = []
-    
-    # 1. Add environment variable path
-    model_data_path = os.environ.get('MODEL_DATA_PATH')
-    if model_data_path:
-        all_potential_paths.append(os.path.join(model_data_path, "BERTSQUADFP16.mlmodel"))
-    
-    # 2. Add search paths from environment
-    if os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS'):
-        for path in os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS', '').split(','):
-            if path.strip():
-                all_potential_paths.append(os.path.join(path.strip(), "BERTSQUADFP16.mlmodel"))
-    
-    # 3. Add standard locations
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-    standard_paths = [
-        os.path.join(app_dir, "model", "BERTSQUADFP16.mlmodel"),
-        os.path.join(os.path.dirname(app_dir), "BERTSQUADFP16.mlmodel"),
-        "/app/app/model/BERTSQUADFP16.mlmodel",
-        "/tmp/model/BERTSQUADFP16.mlmodel",
-        "/opt/render/project/src/backend/app/model/BERTSQUADFP16.mlmodel",
-        "/opt/render/project/src/backend/BERTSQUADFP16.mlmodel"
-    ]
-    all_potential_paths.extend(standard_paths)
-    
-    # 4. Add paths found during filesystem search
-    all_potential_paths.extend(model_files_found)
-    
-    # Remove duplicates while preserving order
-    all_potential_paths = list(dict.fromkeys(all_potential_paths))
-    
-    # Check each path and add to diagnostics
-    for path in all_potential_paths:
+    # Check Jupyter model server status
+    jupyter_server_status = "unknown"
+    if JUPYTER_MODEL_SERVER_AVAILABLE:
         try:
-            exists = os.path.exists(path)
-            size = 0
-            is_valid = False
-            access_error = None
-            
-            if exists:
-                try:
-                    size = os.path.getsize(path) / (1024 * 1024)
-                    # Simple validation - check file size is reasonable
-                    is_valid = size > 10  # Assume model is at least 10MB
-                except Exception as e:
-                    access_error = str(e)
-            
-            all_model_locations.append({
-                "path": path,
-                "exists": exists,
-                "size_mb": round(size, 2) if exists else 0,
-                "current": path == model_status["path"],
-                "valid": is_valid,
-                "error": access_error
-            })
+            jupyter_server_status = "running" if is_jupyter_server_running() else "stopped"
         except Exception as e:
-            # Some paths might not be accessible
-            all_model_locations.append({
-                "path": path,
-                "exists": False,
-                "error": str(e)
-            })
-    
-    # Try to reload the model if it's not loaded
-    model_load_triggered = False
-    if model is None and not model_status["loaded"] and not model_loaded:
-        logger.info("Model not loaded, attempting quick load check")
-        if model_found:
-            model_load_triggered = True
-            # Don't block health check with full model loading
-            import threading
-            
-            def background_load():
-                global model_loaded
-                logger.info("Loading model in background thread from health check")
-                model_loaded = load_model()
-                logger.info(f"Background model load completed, success: {model_loaded}")
-            
-            thread = threading.Thread(target=background_load)
-            thread.daemon = True
-            thread.start()
+            jupyter_server_status = f"error: {str(e)}"
+    else:
+        jupyter_server_status = "not available"
     
     # Free Tier: Skip disk space checks to maintain compatibility
-    # Just report a simple status message instead
     disk_space = {
         "note": "Disk space reporting disabled for Free Tier compatibility",
         "status": "Available disk space should be sufficient for model storage"
     }
     
-    # Prepare comprehensive status response with actionable diagnostics
+    # Prepare status response
     response = {
-        "status": "healthy" if model_status["loaded"] else "degraded",
+        "status": "healthy" if jupyter_server_status == "running" else "degraded",
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "environment": env_info.get("environment", settings.environment),
         "model": {
+            "jupyter_server": jupyter_server_status,
             "loaded": model_status["loaded"],
-            "current_path": model_status["path"],
-            "file_exists": model_status["exists"],
             "load_attempts": model_status["load_attempts"],
-            "last_attempt": model_status["last_attempt_time"],
-            "model_found": model_found,
-            "alternative_locations": all_model_locations
+            "last_attempt": model_status["last_attempt_time"]
         },
         "diagnostics": {
             "runtime_info": {
                 "python_version": sys.version.split()[0],
-                "coremltools_version": getattr(ct, "__version__", "unknown"),
                 "cwd": os.getcwd(),
                 "pid": os.getpid(),
                 "memory_info": {
@@ -763,10 +366,7 @@ async def root():
             "deployment_info": {
                 "in_docker": env_info.get("in_docker", False),
                 "on_render": env_info.get("on_render", False),
-                "model_data_path_env": model_data_path or "Not set",
-                "search_paths_env": os.environ.get('BACKDOOR_MODEL_SEARCH_PATHS', "Not set"),
-                "hostname": env_info.get("hostname", "unknown"),
-                "load_triggered": model_load_triggered
+                "hostname": env_info.get("hostname", "unknown")
             },
             "disk_space": disk_space,
             "startup_time": app.state.startup_time if hasattr(app.state, 'startup_time') else "unknown",
@@ -774,113 +374,6 @@ async def root():
         },
         "api_version": settings.version
     }
-    
-    # Add more info if model is loaded
-    if model_status["loaded"]:
-        response["model"]["model_info"] = {
-            "description": model_status["details"].get("description", "Unknown"),
-            "load_time_sec": model_status["details"].get("load_time_sec", 0),
-            "inputs": model_status["details"].get("inputs", []),
-            "outputs": model_status["details"].get("outputs", [])
-        }
-    
-    # If we have an error, include it with troubleshooting info
-    if model_status["last_error"]:
-        response["model"]["error"] = model_status["last_error"]
-        response["model"]["error_help"] = model_status["last_error"].replace("/", "\/")
-        
-        # Add troubleshooting suggestions based on the error
-        if "not found" in model_status["last_error"].lower() or "no such file" in model_status["last_error"].lower():
-            # Model not found - comprehensive instructions
-            response["diagnostics"]["action_plan"] = {
-                "error_type": "MODEL_NOT_FOUND",
-                "steps": [
-                    {
-                        "id": "check_model_exists",
-                        "description": "Verify model file exists in repository",
-                        "details": f"Found {len([loc for loc in all_model_locations if loc['exists']])} potential model files",
-                        "command": "find / -name 'BERTSQUADFP16.mlmodel' -type f 2>/dev/null"
-                    },
-                    {
-                        "id": "check_render_disk",
-                        "description": "Check if persistent disk is mounted correctly on Render",
-                        "details": "Ensure the mountPath in render.yaml is correctly set to /opt/render/project/src/backend/app/model",
-                        "command": "ls -la /opt/render/project/src/backend/app/model/"
-                    },
-                    {
-                        "id": "manually_download",
-                        "description": "Try downloading the model directly",
-                        "details": "Use the /api/download-model endpoint to force a model download",
-                        "command": "curl -X POST https://yourdomain.com/api/download-model"
-                    },
-                    {
-                        "id": "check_docker",
-                        "description": "For Docker deployments, ensure volumes are correctly mounted",
-                        "details": "Check docker-compose.yml volume mappings",
-                        "command": "docker-compose config"
-                    }
-                ],
-                "likely_cause": "The model file could not be found at any of the expected locations. "
-                               + "This could be due to Git LFS issues, incorrect deployment configuration, "
-                               + "or permissions problems."
-            }
-        elif "memory" in model_status["last_error"].lower():
-            # Memory-related issues
-            response["diagnostics"]["action_plan"] = {
-                "error_type": "MEMORY_ERROR",
-                "steps": [
-                    {
-                        "id": "check_resources",
-                        "description": "Check available memory",
-                        "details": "The model requires at least 2GB of free memory to load",
-                        "command": "free -h"
-                    },
-                    {
-                        "id": "increase_resources",
-                        "description": "Increase memory allocation for the service",
-                        "details": "On Render, upgrade to a plan with more memory"
-                    }
-                ],
-                "likely_cause": "The server doesn't have enough memory to load the model. "
-                               + "CoreML models can require significant memory resources."
-            }
-        else:
-            # Generic model loading issues
-            response["diagnostics"]["action_plan"] = {
-                "error_type": "MODEL_LOADING_ERROR",
-                "steps": [
-                    {
-                        "id": "verify_model",
-                        "description": "Verify model integrity",
-                        "details": "Check if the model file is corrupted",
-                        "command": "cd backend && python verify_model.py"
-                    },
-                    {
-                        "id": "check_coremltools",
-                        "description": "Verify coremltools installation",
-                        "details": "Make sure coremltools is properly installed",
-                        "command": "pip install --upgrade coremltools==7.0"
-                    },
-                    {
-                        "id": "restart_service",
-                        "description": "Restart the service",
-                        "details": "Try restarting the service to clear memory"
-                    }
-                ],
-                "likely_cause": "There was an error loading the model with coremltools. "
-                               + "This could be due to model corruption, compatibility issues, "
-                               + "or resource constraints."
-            }
-    
-    # Add manual download link if model is not found
-    if not model_found:
-        download_url = os.environ.get("MODEL_DOWNLOAD_URL", 
-            "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=ho9dyrm6&dl=1")
-        response["diagnostics"]["download_info"] = {
-            "manual_download_url": download_url,
-            "api_download_endpoint": "/api/download-model",
-            "target_location": model_status["path"]
-        }
     
     # Include debug info for developers
     if settings.debug or settings.environment != "production":
@@ -896,47 +389,18 @@ async def root():
 
 @app.post("/api/download-model")
 async def download_model_endpoint():
-    """Force download the model file from Dropbox."""
-    try:
-        from .utils.initialization import download_model_from_dropbox
-        
-        # Execute the download
-        result = download_model_from_dropbox()
-        
-        if result["success"]:
-            # Try to ensure the model is available in multiple locations
-            from .utils.model_utils import ensure_model_availability
-            ensure_result = ensure_model_availability()
-            
-            # Try to load the model
-            global model_loaded
-            model_loaded = load_model()
-            
-            return {
-                "success": True,
-                "message": f"Model downloaded successfully to {result['path']} ({result['size_mb']:.2f} MB)",
-                "model_loaded": model_loaded,
-                "download_details": result,
-                "copies": ensure_result.get("copied_to", [])
-            }
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to download model: {result.get('error', 'Unknown error')}"
-            )
-    except Exception as e:
-        logger.error(f"Error in download-model endpoint: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error downloading model: {str(e)}"
-        )
+    """Endpoint is deprecated - model is now handled by Jupyter server."""
+    return {
+        "success": False,
+        "message": "This endpoint is deprecated. The model is now handled by the Jupyter model server.",
+        "jupyter_server": JUPYTER_MODEL_SERVER_AVAILABLE
+    }
 
 @app.post("/api/query", response_model=Dict[str, Any])
 @rate_limit_ip_and_tokens(settings.api.rate_limit_calls)
 async def process_query(request: QueryRequest, request_obj: Request):
-    """Process a query using the ML model"""
-    global model, model_loaded
+    """Process a query using the Jupyter model server"""
+    global model_status
     
     # Get client info for tracking and rate limiting
     client_info = get_client_info(request_obj)
@@ -974,50 +438,34 @@ async def process_query(request: QueryRequest, request_obj: Request):
         # Log the input
         logger.info(f"Model input: query_length={len(sanitized_query)}, context_length={len(context)}")
         
-        # Check if we should use Jupyter model server
-        use_jupyter = getattr(app.state, 'use_jupyter_server', False)
-        jupyter_ready = getattr(app.state, 'jupyter_server_ready', False)
+        # Check if Jupyter model server is available
+        if not JUPYTER_MODEL_SERVER_AVAILABLE:
+            logger.error("Jupyter model server not available - cannot process query")
+            raise HTTPException(status_code=503, detail="AI model server not available. Please try again later.")
         
         # Set a timeout for the prediction
         try:
-            # Get prediction using the appropriate method
+            # Get prediction using Jupyter model server
             with asyncio.timeout(settings.model.predict_timeout_seconds):
-                if use_jupyter and jupyter_ready:
-                    # Use Jupyter model server for prediction
-                    logger.info("Using Jupyter model server for prediction")
-                    prediction_result = predict_with_jupyter(sanitized_query, context)
-                    
-                    # Check for errors
-                    if "error" in prediction_result:
-                        logger.error(f"Jupyter model server prediction error: {prediction_result['error']}")
-                        raise Exception(f"Jupyter model server prediction error: {prediction_result['error']}")
-                    
-                    # Convert to expected format
-                    prediction = {
-                        'start_index': prediction_result.get('start_index', 0),
-                        'end_index': prediction_result.get('end_index', 0),
-                        'confidence': prediction_result.get('confidence', 0.0)
-                    }
-                else:
-                    # Use standard model for prediction
-                    logger.info("Using standard model for prediction")
-                    
-                    # Try to reload the model if it's not loaded
-                    if model is None and not model_loaded:
-                        model_loaded = load_model()
-                    
-                    if model is None:
-                        logger.error("Model not loaded - cannot process query")
-                        raise HTTPException(status_code=503, detail="AI model not loaded. Please try again later.")
-                    
-                    # Prepare input for the model
-                    model_input = {
-                        'query_text': sanitized_query,
-                        'passage_text': context
-                    }
-                    
-                    # Get prediction from the model
-                    prediction = model.predict(model_input)
+                # Use Jupyter model server for prediction
+                logger.info("Using Jupyter model server for prediction")
+                model_input = {
+                    'query_text': sanitized_query,
+                    'passage_text': context
+                }
+                prediction_result = await predict_with_jupyter_server(model_input)
+                
+                # Check for errors
+                if "error" in prediction_result:
+                    logger.error(f"Jupyter model server prediction error: {prediction_result['error']}")
+                    raise Exception(f"Jupyter model server prediction error: {prediction_result['error']}")
+                
+                # Convert to expected format
+                prediction = {
+                    'start_index': prediction_result.get('start_index', 0),
+                    'end_index': prediction_result.get('end_index', 0),
+                    'confidence': prediction_result.get('confidence', 0.0)
+                }
         except asyncio.TimeoutError:
             logger.error(f"Model prediction timed out after {settings.model.predict_timeout_seconds} seconds")
             raise HTTPException(
@@ -1095,7 +543,7 @@ async def create_chat_session():
 @rate_limit_ip_and_tokens(settings.api.rate_limit_calls)
 async def chat(session_id: str, message: ChatMessage, request: Request):
     """Add a message to a chat session and get a response"""
-    global model, model_loaded
+    global model_status
     
     # Get client info for tracking and rate limiting
     client_info = get_client_info(request)
@@ -1112,13 +560,10 @@ async def chat(session_id: str, message: ChatMessage, request: Request):
     # Track processing for performance metrics
     start_time = time.time()
     
-    # Try to reload the model if it's not loaded
-    if model is None and not model_loaded:
-        model_loaded = load_model()
-    
-    if model is None:
-        logger.error("Model not loaded - cannot process chat message")
-        raise HTTPException(status_code=503, detail="AI model not loaded. Please try again later.")
+    # Check if Jupyter model server is available
+    if not JUPYTER_MODEL_SERVER_AVAILABLE:
+        logger.error("Jupyter model server not available - cannot process chat message")
+        raise HTTPException(status_code=503, detail="AI model server not available. Please try again later.")
     
     try:
         # Process the user message
@@ -1171,9 +616,17 @@ async def chat(session_id: str, message: ChatMessage, request: Request):
         
         # Set a timeout for the prediction
         try:
-            # Get prediction from the model
+            # Get prediction from the Jupyter model server
             with asyncio.timeout(settings.model.predict_timeout_seconds):
-                prediction = model.predict(model_input)
+                if JUPYTER_MODEL_SERVER_AVAILABLE:
+                    # Use Jupyter model server for prediction
+                    prediction = await predict_with_jupyter_server(model_input)
+                else:
+                    logger.error("Jupyter model server not available")
+                    raise HTTPException(
+                        status_code=503,
+                        detail="AI model server not available. Please try again later."
+                    )
         except asyncio.TimeoutError:
             logger.error(f"Model prediction timed out after {settings.model.predict_timeout_seconds} seconds")
             raise HTTPException(
