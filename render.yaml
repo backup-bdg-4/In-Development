@@ -11,36 +11,10 @@ services:
       # Create only the essential model directory for memory efficiency
       mkdir -p /tmp/model
       
-      # Enable memory-saving mode with Jupyter model server
-      export MINIMIZE_MEMORY_USAGE=true
-      export MODEL_DATA_PATH=/tmp/model
-      export USE_JUPYTER_MODEL_SERVER=true
-      
-      # Check for model file in repository - only copy to /tmp/model
-      echo "Searching for model file in repository..."
-      if [ -f "BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Found model in repository root"
-        cp BERTSQUADFP16.mlmodel /tmp/model/
-      elif [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Found model in backend directory"
-        cp backend/BERTSQUADFP16.mlmodel /tmp/model/
-      elif [ -f "backend/app/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Found model in backend/app/model directory"
-        cp backend/app/model/BERTSQUADFP16.mlmodel /tmp/model/
-      else
-        echo "⚠️ Model not found in repository, attempting to download directly to /tmp/model"
-        # Direct download attempt - download directly to /tmp/model
-        curl -L "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=ho9dyrm6&dl=1" -o /tmp/model/BERTSQUADFP16.mlmodel
-      fi
-      
-      # Verify the model exists
-      if [ -f "/tmp/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Model successfully stored in /tmp/model"
-        echo "Model size: $(du -h /tmp/model/BERTSQUADFP16.mlmodel | cut -f1)"
-      else
-        echo "⚠️ WARNING: Failed to obtain model file"
-        exit 1
-      fi
+      # Enable remote model server mode
+      export USE_REMOTE_MODEL_SERVER=true
+      export REMOTE_MODEL_SERVER_URL=${REMOTE_MODEL_SERVER_URL}
+      export REMOTE_MODEL_SERVER_API_KEY=${REMOTE_MODEL_SERVER_API_KEY}
       
       echo "===== BUILD COMPLETE ====="
     startCommand: |
@@ -49,9 +23,9 @@ services:
       export MODEL_DATA_PATH=/tmp/model
       echo "MODEL_DATA_PATH set to $MODEL_DATA_PATH"
       
-      # Enable Jupyter model server for memory efficiency
-      export USE_JUPYTER_MODEL_SERVER=true
-      echo "Jupyter model server enabled for memory efficiency"
+      # Enable remote model server for offloading model to external service
+      export USE_REMOTE_MODEL_SERVER=true
+      echo "Remote model server enabled for offloading model to external service"
       
       # Start the application
       cd backend
@@ -65,37 +39,19 @@ services:
       # Use /tmp/model for Free Tier compatibility
       - key: MODEL_DATA_PATH
         value: /tmp/model
-      - key: BACKDOOR_MODEL_SEARCH_PATHS
-        value: "/tmp/model,/app/app/model,/app/backend/app/model,/app/backend,/app"
       # Flag to indicate we're running on Render
       - key: RUNNING_ON_RENDER
         value: "true"
       # Enable memory-saving mode to avoid redundant model copies
       - key: MINIMIZE_MEMORY_USAGE
         value: "true"
-      # Enable Jupyter model server for memory efficiency
-      - key: USE_JUPYTER_MODEL_SERVER
+      # Enable remote model server for offloading model to external service
+      - key: USE_REMOTE_MODEL_SERVER
         value: "true"
-      # Disable model download timeout for initial load
-      - key: MODEL_LOAD_TIMEOUT
-        value: "120"
+      # Remote model server URL
+      - key: REMOTE_MODEL_SERVER_URL
+        sync: false
+      # Remote model server API key
+      - key: REMOTE_MODEL_SERVER_API_KEY
+        sync: false
     healthCheckPath: /
-
-  # Frontend service
-  - type: web
-    name: backdoor-ai-frontend
-    env: docker
-    dockerfilePath: ./frontend/Dockerfile
-    dockerContext: ./frontend
-    plan: free
-    envVars:
-      - key: REACT_APP_API_URL
-        fromService:
-          name: backdoor-ai-backend
-          type: web
-          property: host
-      - key: BACKEND_URL
-        fromService:
-          name: backdoor-ai-backend
-          type: web
-          property: hostport

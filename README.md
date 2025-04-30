@@ -8,6 +8,7 @@ This application consists of:
 
 - **Backend**: A FastAPI server that loads and uses a CoreML model for processing chat messages
 - **Frontend**: A React application that provides a user-friendly chat interface
+- **Remote Model Server** (New): A separate server that hosts the CoreML model and provides prediction endpoints
 
 ## Prerequisites
 
@@ -26,9 +27,11 @@ cd <repository-directory>
 
 ### 2. Set Up the CoreML Model
 
-The application requires a CoreML model file (`BERTSQUADFP16.mlmodel`) to function. You need to provide a Dropbox direct download link to your model file.
+The application requires a CoreML model file (`BERTSQUADFP16.mlmodel`) to function. You have two options:
 
-#### Option 1: Using the Setup Script
+#### Option 1: Using the Local Model Approach
+
+You need to provide a Dropbox direct download link to your model file.
 
 ```bash
 cd backend
@@ -40,23 +43,19 @@ This script will:
 - Download the model
 - Verify that the model works correctly
 
-#### Option 2: Manual Setup
+#### Option 2: Using the Remote Model Server Approach (Recommended)
 
-1. Update the Dropbox link in `backend/download_model.py`:
-   ```python
-   DROPBOX_LINK = "https://www.dropbox.com/your-direct-download-link?dl=1"
-   ```
+This approach offloads model inference to a separate server, avoiding the need to download the model to the main application server.
 
-2. Download the model:
+1. Deploy the remote model server (see `model_server/DEPLOYMENT.md` for instructions)
+2. Configure the main application to use the remote model server:
    ```bash
-   cd backend
-   python download_model.py
+   export USE_REMOTE_MODEL_SERVER=true
+   export REMOTE_MODEL_SERVER_URL="https://your-model-server-url.com"
+   export REMOTE_MODEL_SERVER_API_KEY="your-api-key"
    ```
 
-3. Verify the model:
-   ```bash
-   python verify_model.py
-   ```
+For more details on the remote model server approach, see `REMOTE_MODEL_SERVER.md`.
 
 ### 3. Start the Backend Server
 
@@ -124,4 +123,3 @@ The backend API documentation is available at http://localhost:8000/docs when th
 ## License
 
 [Your License Information]
-
