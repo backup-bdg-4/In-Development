@@ -1,62 +1,10 @@
 services:
-  # Backend service for ML model - Using native Python runtime
+  # Backend service for ML model - Using Docker runtime
   - type: web
     name: backdoor-ai-backend
-    env: python
-    buildCommand: |
-      # Install backend dependencies
-      pip install -r backend/requirements.txt
-      
-      echo "===== BUILD STAGE (Free Tier) ====="
-      # Create model directories
-      mkdir -p /tmp/model backend/app/model
-      
-      # Check for model file in repository
-      echo "Searching for model file in repository..."
-      if [ -f "BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Found model in repository root"
-        cp BERTSQUADFP16.mlmodel /tmp/model/
-        cp BERTSQUADFP16.mlmodel backend/app/model/
-      elif [ -f "backend/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Found model in backend directory"
-        cp backend/BERTSQUADFP16.mlmodel /tmp/model/
-        cp backend/BERTSQUADFP16.mlmodel backend/app/model/
-      else
-        echo "⚠️ Model not found in repository, attempting to download"
-        cd backend
-        python download_model.py
-        cd ..
-        
-        # Copy downloaded model to /tmp/model for redundancy
-        if [ -f "backend/app/model/BERTSQUADFP16.mlmodel" ]; then
-          cp backend/app/model/BERTSQUADFP16.mlmodel /tmp/model/
-        fi
-      fi
-      
-      # Verify the model exists
-      if [ -f "/tmp/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Model successfully copied to /tmp/model"
-        echo "Model size: $(du -h /tmp/model/BERTSQUADFP16.mlmodel | cut -f1)"
-      elif [ -f "backend/app/model/BERTSQUADFP16.mlmodel" ]; then
-        echo "✅ Model found in backend/app/model"
-        cp backend/app/model/BERTSQUADFP16.mlmodel /tmp/model/
-        echo "Model size: $(du -h backend/app/model/BERTSQUADFP16.mlmodel | cut -f1)"
-      else
-        echo "⚠️ WARNING: Model file not found, attempting direct download"
-        # Direct download attempt
-        curl -L "https://www.dropbox.com/scl/fi/w4iclrvil6vh39mg6j7pl/BERTSQUADFP16.mlmodel?rlkey=vbrr9jjvsam1xg9i4i19pkdra&st=ho9dyrm6&dl=1" -o /tmp/model/BERTSQUADFP16.mlmodel
-      fi
-      
-      echo "===== BUILD COMPLETE ====="
-    startCommand: |
-      echo "===== STARTING APPLICATION (Free Tier) ====="
-      # Ensure model path is set correctly
-      export MODEL_DATA_PATH=/tmp/model
-      echo "MODEL_DATA_PATH set to $MODEL_DATA_PATH"
-      
-      # Start the application
-      cd backend
-      python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
     plan: free
     envVars:
       - key: ENVIRONMENT
