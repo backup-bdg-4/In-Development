@@ -46,6 +46,13 @@ def test_jupyter_model_server():
                 if os.path.exists(loc):
                     model_path = loc
                     logger.info(f"Found model at {model_path}")
+                    
+                    # Copy to /tmp/model for future use
+                    os.makedirs("/tmp/model", exist_ok=True)
+                    import shutil
+                    shutil.copy2(loc, "/tmp/model/BERTSQUADFP16.mlmodel")
+                    logger.info(f"Copied model to /tmp/model/BERTSQUADFP16.mlmodel")
+                    model_path = "/tmp/model/BERTSQUADFP16.mlmodel"
                     break
             else:
                 logger.error("Model not found in any location")

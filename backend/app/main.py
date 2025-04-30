@@ -164,6 +164,38 @@ async def startup_event():
         jupyter_thread.start()
         logger.info("Started background thread for Jupyter model server initialization")
         
+        # Start periodic checks for Jupyter server status
+        app.state.jupyter_check_interval = 30  # seconds
+        
+        def check_jupyter_server_status():
+            """Check if Jupyter server is running and restart if needed."""
+            try:
+                if not is_jupyter_server_running():
+                    logger.warning("Jupyter model server not running, attempting to initialize")
+                    model_path = getattr(app.state, 'model_path', '/tmp/model/BERTSQUADFP16.mlmodel')
+                    if not model_path.endswith('BERTSQUADFP16.mlmodel'):
+                        model_path = os.path.join(model_path, 'BERTSQUADFP16.mlmodel')
+                    success = initialize_model_server(model_path)
+                    if success:
+                        logger.info("Jupyter model server restarted successfully")
+                        app.state.jupyter_server_ready = True
+                    else:
+                        logger.error("Failed to restart Jupyter model server")
+                        app.state.jupyter_server_ready = False
+            except Exception as e:
+                logger.error(f"Error checking Jupyter server status: {str(e)}")
+        
+        # Schedule periodic checks
+        import threading
+        
+        def schedule_jupyter_checks():
+            check_jupyter_server_status()
+            threading.Timer(app.state.jupyter_check_interval, schedule_jupyter_checks).start()
+        
+        # Start the periodic checks
+        threading.Timer(app.state.jupyter_check_interval, schedule_jupyter_checks).start()
+        logger.info("Started periodic checks for Jupyter model server")
+        
         # Force garbage collection to free memory
         try:
             gc.collect()
@@ -177,7 +209,7 @@ async def startup_event():
             logger.info("Memory-saving mode: Garbage collection performed")
         except Exception as e:
             logger.warning(f"Failed to perform garbage collection: {e}")
-            
+        
         logger.warning("Standard model loading is disabled. Please use Jupyter model server.")
 
 @app.on_event("shutdown")
@@ -272,7 +304,10 @@ def schedule_model_checks():
                 server_running = is_jupyter_server_running()
                 if not server_running:
                     logger.warning("Jupyter model server not running, attempting to initialize")
-                    initialize_model_server()
+                    model_path = os.environ.get('MODEL_DATA_PATH', '/tmp/model')
+                    if not model_path.endswith('BERTSQUADFP16.mlmodel'):
+                        model_path = os.path.join(model_path, 'BERTSQUADFP16.mlmodel')
+                    initialize_model_server(model_path)
             except Exception as e:
                 logger.error(f"Error checking Jupyter server status: {str(e)}")
         
