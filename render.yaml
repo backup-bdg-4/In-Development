@@ -11,9 +11,10 @@ services:
       # Create only the essential model directory for memory efficiency
       mkdir -p /tmp/model
       
-      # Enable memory-saving mode
+      # Enable memory-saving mode with Jupyter model server
       export MINIMIZE_MEMORY_USAGE=true
       export MODEL_DATA_PATH=/tmp/model
+      export USE_JUPYTER_MODEL_SERVER=true
       
       # Check for model file in repository - only copy to /tmp/model
       echo "Searching for model file in repository..."
@@ -48,6 +49,10 @@ services:
       export MODEL_DATA_PATH=/tmp/model
       echo "MODEL_DATA_PATH set to $MODEL_DATA_PATH"
       
+      # Enable Jupyter model server for memory efficiency
+      export USE_JUPYTER_MODEL_SERVER=true
+      echo "Jupyter model server enabled for memory efficiency"
+      
       # Start the application
       cd backend
       python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
@@ -67,6 +72,9 @@ services:
         value: "true"
       # Enable memory-saving mode to avoid redundant model copies
       - key: MINIMIZE_MEMORY_USAGE
+        value: "true"
+      # Enable Jupyter model server for memory efficiency
+      - key: USE_JUPYTER_MODEL_SERVER
         value: "true"
       # Disable model download timeout for initial load
       - key: MODEL_LOAD_TIMEOUT

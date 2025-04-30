@@ -16,6 +16,7 @@ import asyncio
 from bs4 import BeautifulSoup
 import requests
 import sys
+import gc
 from prometheus_fastapi_instrumentator import Instrumentator
 
 # Import configuration and utilities
@@ -24,6 +25,19 @@ from .utils.security_utils import setup_security, get_client_info, rate_limit_ip
 from .utils.code_utils import contains_code, is_code_question, format_code_for_response
 from .utils.response_utils import enhance_response, categorize_query, log_query_response
 from .utils.search_utils import search_web, SEARCH_CACHE
+
+# Import Jupyter model server (for memory-efficient model loading)
+try:
+    from .utils.jupyter_model_server import (
+        initialize_model_server, 
+        predict_with_jupyter, 
+        shutdown_jupyter_server,
+        is_jupyter_server_running
+    )
+    JUPYTER_MODEL_SERVER_AVAILABLE = True
+except ImportError:
+    JUPYTER_MODEL_SERVER_AVAILABLE = False
+    logging.warning("Jupyter model server not available, falling back to standard model loading")
 
 # Configure logging based on settings
 logging_level = getattr(logging, settings.logging.level.upper(), logging.INFO)
@@ -68,13 +82,24 @@ if settings.environment != "production":
 async def startup_event():
     logger.info(f"Starting {settings.app_name} version {settings.version} in {settings.environment} mode")
     
-    # Import nltk resources if needed
-    try:
-        import nltk
-        nltk.download('punkt', quiet=True)
-        logger.info("NLTK resources loaded")
-    except Exception as e:
-        logger.warning(f"Failed to load NLTK resources: {e}")
+    # Check if we're in memory-saving mode
+    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
+    running_on_render = os.environ.get('RUNNING_ON_RENDER') == 'true'
+    memory_saving_mode = minimize_memory or running_on_render
+    
+    if memory_saving_mode:
+        logger.info("Memory-saving mode active - optimizing startup process")
+    
+    # Import nltk resources only if not in memory-saving mode
+    if not memory_saving_mode:
+        try:
+            import nltk
+            nltk.download('punkt', quiet=True)
+            logger.info("NLTK resources loaded")
+        except Exception as e:
+            logger.warning(f"Failed to load NLTK resources: {e}")
+    else:
+        logger.info("Memory-saving mode: Skipping NLTK resources loading")
     
     # Initialize the application with enhanced setup
     try:
@@ -86,6 +111,9 @@ async def startup_event():
         
         if init_result['model']['found']:
             logger.info(f"✅ Model found at {init_result['model']['path']} ({init_result['model']['size_mb']:.2f} MB)")
+            
+            # Save model path for later use
+            app.state.model_path = init_result['model']['path']
         else:
             logger.error(f"❌ Model not found during initialization")
             
@@ -100,45 +128,116 @@ async def startup_event():
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
     
-    # Check initial model status
-    global model, model_loaded
-    if model_loaded:
-        logger.info("Model pre-loaded successfully")
-    else:
-        logger.warning("Model will be loaded on first request")
+    # Check if we should use Jupyter model server
+    use_jupyter_env = os.environ.get('USE_JUPYTER_MODEL_SERVER') == 'true'
+    use_jupyter = (memory_saving_mode or use_jupyter_env) and JUPYTER_MODEL_SERVER_AVAILABLE
+    app.state.use_jupyter_server = use_jupyter
+    
+    if use_jupyter_env and not JUPYTER_MODEL_SERVER_AVAILABLE:
+        logger.warning("USE_JUPYTER_MODEL_SERVER is set but Jupyter is not available. Falling back to standard model loading.")
+    
+    if use_jupyter:
+        logger.info("Using Jupyter model server for memory-efficient model loading")
         
-        # Try to pre-load the model asynchronously
+        # Initialize Jupyter model server in a background thread
         import threading
         
-        def preload_model_thread():
+        def init_jupyter_server_thread():
             try:
-                global model, model_loaded
-                logger.info("Starting asynchronous model pre-loading")
-                model_loaded = load_model()
-                if model_loaded:
-                    logger.info("Model pre-loaded successfully in background thread")
+                model_path = getattr(app.state, 'model_path', '/tmp/model/BERTSQUADFP16.mlmodel')
+                logger.info(f"Initializing Jupyter model server with model at {model_path}")
+                success = initialize_model_server(model_path)
+                if success:
+                    logger.info("Jupyter model server initialized successfully")
+                    app.state.jupyter_server_ready = True
                 else:
-                    logger.error("Failed to pre-load model in background thread")
+                    logger.error("Failed to initialize Jupyter model server")
+                    app.state.jupyter_server_ready = False
             except Exception as e:
-                logger.error(f"Error in model pre-loading thread: {str(e)}")
+                logger.error(f"Error initializing Jupyter model server: {str(e)}")
+                app.state.jupyter_server_ready = False
         
-        # Start pre-loading in a background thread to avoid blocking startup
-        preload_thread = threading.Thread(target=preload_model_thread)
-        preload_thread.daemon = True
-        preload_thread.start()
-        logger.info("Started background thread for model pre-loading")
+        # Start initialization in a background thread
+        jupyter_thread = threading.Thread(target=init_jupyter_server_thread)
+        jupyter_thread.daemon = True
+        jupyter_thread.start()
+        logger.info("Started background thread for Jupyter model server initialization")
+        
+        # Force garbage collection to free memory
+        try:
+            gc.collect()
+            logger.info("Memory-saving mode: Garbage collection performed")
+        except Exception as e:
+            logger.warning(f"Failed to perform garbage collection: {e}")
+    else:
+        # Check initial model status
+        global model, model_loaded
+        
+        # In memory-saving mode, don't pre-load the model
+        if memory_saving_mode:
+            logger.info("Memory-saving mode: Model will be loaded on first request (lazy loading)")
+            # Force garbage collection to free memory
+            try:
+                gc.collect()
+                logger.info("Memory-saving mode: Garbage collection performed")
+            except Exception as e:
+                logger.warning(f"Failed to perform garbage collection: {e}")
+        else:
+            # Standard mode - pre-load the model
+            if model_loaded:
+                logger.info("Model pre-loaded successfully")
+            else:
+                logger.warning("Model will be loaded on first request")
+                
+                # Try to pre-load the model asynchronously
+                import threading
+                
+                def preload_model_thread():
+                    try:
+                        global model, model_loaded
+                        logger.info("Starting asynchronous model pre-loading")
+                        model_loaded = load_model()
+                        if model_loaded:
+                            logger.info("Model pre-loaded successfully in background thread")
+                        else:
+                            logger.error("Failed to pre-load model in background thread")
+                    except Exception as e:
+                        logger.error(f"Error in model pre-loading thread: {str(e)}")
+                
+                # Start pre-loading in a background thread to avoid blocking startup
+                preload_thread = threading.Thread(target=preload_model_thread)
+                preload_thread.daemon = True
+                preload_thread.start()
+                logger.info("Started background thread for model pre-loading")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info(f"Shutting down {settings.app_name}")
     
-    # Clear any global resources
-    if 'model' in globals() and model is not None:
+    # Check if we're using Jupyter model server
+    if getattr(app.state, 'use_jupyter_server', False):
         try:
-            model = None
-            logger.info("Model released from memory")
+            logger.info("Shutting down Jupyter model server")
+            shutdown_jupyter_server()
+            logger.info("Jupyter model server shut down successfully")
         except Exception as e:
-            logger.error(f"Error releasing model: {e}")
+            logger.error(f"Error shutting down Jupyter model server: {str(e)}")
+    else:
+        # Clear any global resources
+        if 'model' in globals() and model is not None:
+            try:
+                global model
+                model = None
+                logger.info("Model released from memory")
+            except Exception as e:
+                logger.error(f"Error releasing model: {e}")
+    
+    # Force garbage collection to free memory
+    try:
+        gc.collect()
+        logger.info("Garbage collection performed during shutdown")
+    except Exception as e:
+        logger.warning(f"Failed to perform garbage collection: {e}")
 
 # Add redirect from root to docs
 @app.get("/", include_in_schema=False)
@@ -173,7 +272,7 @@ model_status = {
 def load_model(force_reload=False):
     """
     Load the CoreML model for inference.
-    Memory-efficient version that minimizes redundant copies and validations.
+    Memory-efficient version with lazy loading and garbage collection.
     
     Args:
         force_reload (bool): If True, reload the model even if it's already loaded
@@ -196,6 +295,15 @@ def load_model(force_reload=False):
     if model is not None and not force_reload:
         logger.info("Model already loaded, skipping load")
         return True
+    
+    # Force garbage collection before loading model
+    if memory_saving_mode:
+        try:
+            import gc
+            gc.collect()
+            logger.info("Memory-saving mode: Garbage collection performed before model loading")
+        except Exception as e:
+            logger.warning(f"Failed to perform garbage collection: {e}")
     
     # First, ensure model is available using our enhanced model utilities
     # This will use memory-saving mode if enabled
@@ -271,6 +379,14 @@ Error details: {model_availability.get('error', 'Unknown error')}
         # Clear any previous model from memory
         if model is not None:
             model = None
+            # Force garbage collection to free memory
+            if memory_saving_mode:
+                try:
+                    import gc
+                    gc.collect()
+                    logger.info("Memory-saving mode: Cleared previous model and performed garbage collection")
+                except Exception as e:
+                    logger.warning(f"Failed to perform garbage collection: {e}")
         
         logger.info(f"Loading model from {model_path}")
         
@@ -288,24 +404,38 @@ Error details: {model_availability.get('error', 'Unknown error')}
         model = ct.models.MLModel(model_path)
         load_time = time.time() - start_time
         
-        # Get model details
-        spec = model.get_spec()
-        
-        # Store model metadata
-        model_status["details"] = {
-            "description": spec.description.metadata.shortDescription if hasattr(spec.description.metadata, "shortDescription") else "Unknown",
-            "author": spec.description.metadata.author if hasattr(spec.description.metadata, "author") else "Unknown",
-            "load_time_sec": load_time,
-            "inputs": [input_desc.name for input_desc in spec.description.input],
-            "outputs": [output_desc.name for output_desc in spec.description.output],
-            "size_mb": os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0,
-            "memory_saving_mode": memory_saving_mode
-        }
+        # Get model details - in memory-saving mode, get minimal details
+        if memory_saving_mode:
+            # Store minimal model metadata to save memory
+            model_status["details"] = {
+                "description": "Minimal details in memory-saving mode",
+                "load_time_sec": load_time,
+                "size_mb": os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0,
+                "memory_saving_mode": memory_saving_mode
+            }
+            logger.info("Memory-saving mode: Using minimal model metadata")
+        else:
+            # Standard mode - get full details
+            spec = model.get_spec()
+            model_status["details"] = {
+                "description": spec.description.metadata.shortDescription if hasattr(spec.description.metadata, "shortDescription") else "Unknown",
+                "author": spec.description.metadata.author if hasattr(spec.description.metadata, "author") else "Unknown",
+                "load_time_sec": load_time,
+                "inputs": [input_desc.name for input_desc in spec.description.input],
+                "outputs": [output_desc.name for output_desc in spec.description.output],
+                "size_mb": os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0,
+                "memory_saving_mode": memory_saving_mode
+            }
         
         logger.info(f"Model loaded successfully in {load_time:.2f} seconds")
-        logger.info(f"Model description: {model_status['details']['description']}")
-        logger.info(f"Model inputs: {model_status['details']['inputs']}")
-        logger.info(f"Model outputs: {model_status['details']['outputs']}")
+        
+        # Only log detailed info if not in memory-saving mode
+        if not memory_saving_mode:
+            logger.info(f"Model description: {model_status['details'].get('description', 'Unknown')}")
+            if 'inputs' in model_status['details']:
+                logger.info(f"Model inputs: {model_status['details']['inputs']}")
+            if 'outputs' in model_status['details']:
+                logger.info(f"Model outputs: {model_status['details']['outputs']}")
         
         # Test model with a simple prediction
         test_success = _test_model_basic_prediction()
@@ -325,6 +455,15 @@ Error details: {model_availability.get('error', 'Unknown error')}
         if model_status.get("alternate_paths"):
             logger.info(f"Model also available at: {', '.join(model_status['alternate_paths'])}")
         
+        # Force garbage collection after successful load in memory-saving mode
+        if memory_saving_mode:
+            try:
+                import gc
+                gc.collect()
+                logger.info("Memory-saving mode: Garbage collection performed after model loading")
+            except Exception as e:
+                logger.warning(f"Failed to perform garbage collection: {e}")
+        
         return True
     
     except Exception as e:
@@ -338,30 +477,56 @@ Error details: {model_availability.get('error', 'Unknown error')}
 def _test_model_basic_prediction():
     """
     Test the model with a basic prediction to ensure it's working correctly.
+    Memory-efficient version that minimizes logging and cleans up after testing.
     
     Returns:
         bool: True if prediction succeeds, False otherwise
     """
     global model
     
+    # Check if we're in memory-saving mode
+    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
+    running_on_render = os.environ.get('RUNNING_ON_RENDER') == 'true'
+    memory_saving_mode = minimize_memory or running_on_render
+    
     if model is None:
         logger.error("Cannot test model - model not loaded")
         return False
     
     try:
-        # Create a simple test input
+        # Create a simple test input (minimal size)
         test_input = {
-            'query_text': 'What is AI?',
-            'passage_text': 'Artificial Intelligence (AI) is the simulation of human intelligence processes by machines.'
+            'query_text': 'Test?',
+            'passage_text': 'This is a test.'
         }
         
         # Try a prediction
-        logger.info("Testing model with basic prediction")
+        if memory_saving_mode:
+            logger.info("Memory-saving mode: Performing minimal model test")
+        else:
+            logger.info("Testing model with basic prediction")
+            
         prediction = model.predict(test_input)
         
         # Check if prediction has expected format
         if isinstance(prediction, dict) and prediction:
-            logger.info("Basic model prediction successful")
+            if memory_saving_mode:
+                logger.info("Memory-saving mode: Model test successful")
+            else:
+                logger.info("Basic model prediction successful")
+                
+            # Clean up prediction data to free memory
+            prediction = None
+            
+            # Force garbage collection in memory-saving mode
+            if memory_saving_mode:
+                try:
+                    import gc
+                    gc.collect()
+                    logger.info("Memory-saving mode: Garbage collection performed after test prediction")
+                except Exception as e:
+                    logger.warning(f"Failed to perform garbage collection: {e}")
+                
             return True
         else:
             logger.error(f"Unexpected prediction format: {type(prediction)}")
@@ -369,7 +534,8 @@ def _test_model_basic_prediction():
             
     except Exception as e:
         logger.error(f"Error during model test prediction: {str(e)}")
-        logger.error(traceback.format_exc())
+        if not memory_saving_mode:
+            logger.error(traceback.format_exc())
         return False
 
 # Load the model on startup
@@ -783,14 +949,6 @@ async def process_query(request: QueryRequest, request_obj: Request):
         logger.warning(f"Invalid query from client {client_info['client_id']}: {error_message}")
         raise HTTPException(status_code=400, detail=error_message)
     
-    # Try to reload the model if it's not loaded
-    if model is None and not model_loaded:
-        model_loaded = load_model()
-    
-    if model is None:
-        logger.error("Model not loaded - cannot process query")
-        raise HTTPException(status_code=503, detail="AI model not loaded. Please try again later.")
-    
     # Track processing for performance metrics
     start_time = time.time()
     search_results = []
@@ -813,20 +971,53 @@ async def process_query(request: QueryRequest, request_obj: Request):
         if not context or context.strip() == "":
             context = settings.ai_response.default_context
         
-        # Prepare input for the model
-        model_input = {
-            'query_text': sanitized_query,
-            'passage_text': context
-        }
-        
         # Log the input
         logger.info(f"Model input: query_length={len(sanitized_query)}, context_length={len(context)}")
         
+        # Check if we should use Jupyter model server
+        use_jupyter = getattr(app.state, 'use_jupyter_server', False)
+        jupyter_ready = getattr(app.state, 'jupyter_server_ready', False)
+        
         # Set a timeout for the prediction
         try:
-            # Get prediction from the model
+            # Get prediction using the appropriate method
             with asyncio.timeout(settings.model.predict_timeout_seconds):
-                prediction = model.predict(model_input)
+                if use_jupyter and jupyter_ready:
+                    # Use Jupyter model server for prediction
+                    logger.info("Using Jupyter model server for prediction")
+                    prediction_result = predict_with_jupyter(sanitized_query, context)
+                    
+                    # Check for errors
+                    if "error" in prediction_result:
+                        logger.error(f"Jupyter model server prediction error: {prediction_result['error']}")
+                        raise Exception(f"Jupyter model server prediction error: {prediction_result['error']}")
+                    
+                    # Convert to expected format
+                    prediction = {
+                        'start_index': prediction_result.get('start_index', 0),
+                        'end_index': prediction_result.get('end_index', 0),
+                        'confidence': prediction_result.get('confidence', 0.0)
+                    }
+                else:
+                    # Use standard model for prediction
+                    logger.info("Using standard model for prediction")
+                    
+                    # Try to reload the model if it's not loaded
+                    if model is None and not model_loaded:
+                        model_loaded = load_model()
+                    
+                    if model is None:
+                        logger.error("Model not loaded - cannot process query")
+                        raise HTTPException(status_code=503, detail="AI model not loaded. Please try again later.")
+                    
+                    # Prepare input for the model
+                    model_input = {
+                        'query_text': sanitized_query,
+                        'passage_text': context
+                    }
+                    
+                    # Get prediction from the model
+                    prediction = model.predict(model_input)
         except asyncio.TimeoutError:
             logger.error(f"Model prediction timed out after {settings.model.predict_timeout_seconds} seconds")
             raise HTTPException(
