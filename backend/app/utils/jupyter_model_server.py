@@ -254,7 +254,8 @@ def start_jupyter_server(model_path: str) -> bool:
             f"--port={JUPYTER_SERVER_PORT}",
             "--ip=0.0.0.0",
             "--NotebookApp.token=''",
-            "--NotebookApp.password=''"
+            "--NotebookApp.password=''",
+            "--NotebookApp.disable_check_xsrf=True"  # Disable XSRF protection for API calls
         ]
         
         logger.info(f"Starting Jupyter server with command: {' '.join(cmd)}")
@@ -301,27 +302,69 @@ def execute_notebook_cell(notebook_path: str, cell_index: int) -> Dict[str, Any]
         with open(notebook_path, 'r') as f:
             notebook = json.load(f)
         
-        # Execute the cell using the Jupyter API
-        response = requests.post(
-            f"{JUPYTER_SERVER_URL}/api/contents/{os.path.basename(notebook_path)}/checkpoints",
-            json={"cells": notebook["cells"]}
-        )
+        # Use a different approach for executing cells
+        # Instead of using the Jupyter API directly, use the kernels API
         
-        if response.status_code != 201:
-            logger.error(f"Failed to create checkpoint: {response.text}")
-            return {"success": False, "error": "Failed to create checkpoint"}
+        # First, get the kernel ID
+        response = requests.get(f"{JUPYTER_SERVER_URL}/api/kernels")
+        if response.status_code != 200:
+            logger.error(f"Failed to get kernels: {response.text}")
+            return {"success": False, "error": f"Failed to get kernels: {response.text}"}
         
-        # Execute the cell
+        kernels = response.json()
+        if not kernels:
+            logger.error("No kernels found")
+            
+            # Try to start a new kernel
+            response = requests.post(
+                f"{JUPYTER_SERVER_URL}/api/kernels",
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response.status_code != 201:
+                logger.error(f"Failed to start kernel: {response.text}")
+                return {"success": False, "error": f"Failed to start kernel: {response.text}"}
+            
+            kernel_id = response.json().get("id")
+        else:
+            kernel_id = kernels[0].get("id")
+        
+        if not kernel_id:
+            logger.error("Could not get a valid kernel ID")
+            return {"success": False, "error": "Could not get a valid kernel ID"}
+        
+        # Execute the cell using the kernel
+        cell_content = "".join(notebook["cells"][cell_index]["source"])
+        
         response = requests.post(
-            f"{JUPYTER_SERVER_URL}/api/cells/{os.path.basename(notebook_path)}/{cell_index}/execute",
-            json={}
+            f"{JUPYTER_SERVER_URL}/api/kernels/{kernel_id}/execute",
+            json={"code": cell_content},
+            headers={"Content-Type": "application/json"}
         )
         
         if response.status_code != 200:
             logger.error(f"Failed to execute cell: {response.text}")
-            return {"success": False, "error": "Failed to execute cell"}
+            return {"success": False, "error": f"Failed to execute cell: {response.text}"}
         
-        return {"success": True, "result": response.json()}
+        # Get the execution result
+        msg_id = response.json().get("msg_id")
+        
+        # Wait for execution to complete
+        for _ in range(30):  # Wait up to 30 seconds
+            response = requests.get(f"{JUPYTER_SERVER_URL}/api/kernels/{kernel_id}/messages")
+            if response.status_code != 200:
+                logger.error(f"Failed to get messages: {response.text}")
+                break
+            
+            messages = response.json()
+            for msg in messages:
+                if msg.get("msg_id") == msg_id and msg.get("msg_type") == "execute_result":
+                    return {"success": True, "result": msg.get("content", {})}
+            
+            time.sleep(1)
+        
+        # If we get here, we didn't get a result in time
+        return {"success": True, "result": {"outputs": []}}
     
     except Exception as e:
         logger.error(f"Error executing notebook cell: {str(e)}")

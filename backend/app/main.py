@@ -111,7 +111,12 @@ async def startup_event():
         logger.info(f"Environment: {init_result['environment']['environment']}")
         
         if init_result['model']['found']:
-            logger.info(f"✅ Model found at {init_result['model']['path']} ({init_result['model']['size_mb']:.2f} MB)")
+            # Add null check for model size
+            model_size_mb = init_result['model'].get('size_mb')
+            if model_size_mb is not None:
+                logger.info(f"✅ Model found at {init_result['model']['path']} ({model_size_mb:.2f} MB)")
+            else:
+                logger.info(f"✅ Model found at {init_result['model']['path']} (size unknown)")
             
             # Save model path for later use
             app.state.model_path = init_result['model']['path']
@@ -260,31 +265,34 @@ load_model()
 
 # Schedule periodic Jupyter server checks
 def schedule_model_checks():
-    """Schedule periodic checks to ensure Jupyter model server is running"""
-    import threading
+    """Schedule periodic checks to ensure Jupyter model server is running."""
+    global JUPYTER_SERVER_CHECK_THREAD
     
     def check_jupyter_server():
-        global model_status
-        
-        # Check if Jupyter server is running
-        if JUPYTER_MODEL_SERVER_AVAILABLE:
+        while True:
             try:
-                server_running = is_jupyter_server_running()
-                if not server_running:
-                    logger.warning("Jupyter model server not running, attempting to initialize")
-                    initialize_model_server()
+                if getattr(app.state, 'use_jupyter_server', False):
+                    # Check if Jupyter server is running
+                    if not is_jupyter_server_running():
+                        logger.warning("Jupyter model server not running, attempting to initialize")
+                        model_path = getattr(app.state, 'model_path', '/tmp/model/BERTSQUADFP16.mlmodel')
+                        success = initialize_model_server(model_path)
+                        if success:
+                            logger.info("Jupyter model server reinitialized successfully")
+                            app.state.jupyter_server_ready = True
+                        else:
+                            logger.error("Failed to reinitialize Jupyter model server")
+                            app.state.jupyter_server_ready = False
             except Exception as e:
                 logger.error(f"Error checking Jupyter server status: {str(e)}")
-        
-        # Schedule the next check
-        check_timer = threading.Timer(300, check_jupyter_server)  # Check every 5 minutes
-        check_timer.daemon = True
-        check_timer.start()
+            
+            # Sleep for 30 seconds before next check
+            time.sleep(30)
     
-    # Start the first check
-    initial_timer = threading.Timer(60, check_jupyter_server)  # First check after 1 minute
-    initial_timer.daemon = True
-    initial_timer.start()
+    # Start the check thread
+    JUPYTER_SERVER_CHECK_THREAD = threading.Thread(target=check_jupyter_server)
+    JUPYTER_SERVER_CHECK_THREAD.daemon = True
+    JUPYTER_SERVER_CHECK_THREAD.start()
     logger.info("Started periodic checks for Jupyter model server")
 
 # Start the scheduled checks
