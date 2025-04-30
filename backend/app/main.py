@@ -173,8 +173,7 @@ model_status = {
 def load_model(force_reload=False):
     """
     Load the CoreML model for inference.
-    This enhanced version checks multiple possible locations for the model file
-    and copies the model between locations if needed for redundancy.
+    Memory-efficient version that minimizes redundant copies and validations.
     
     Args:
         force_reload (bool): If True, reload the model even if it's already loaded
@@ -183,6 +182,11 @@ def load_model(force_reload=False):
         bool: True if model loaded successfully, False otherwise
     """
     global model, model_status
+    
+    # Check if we're in memory-saving mode
+    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
+    running_on_render = os.environ.get('RUNNING_ON_RENDER') == 'true'
+    memory_saving_mode = minimize_memory or running_on_render
     
     # Track attempt
     model_status["load_attempts"] += 1
@@ -194,11 +198,13 @@ def load_model(force_reload=False):
         return True
     
     # First, ensure model is available using our enhanced model utilities
+    # This will use memory-saving mode if enabled
     model_availability = ensure_model_availability()
     
     # Update status
     model_status["exists"] = model_availability["found"]
     model_status["path"] = model_availability.get("source_path", MODEL_PATH)
+    model_status["memory_saving_mode"] = memory_saving_mode
     
     # Store all paths we checked
     if "copied_to" in model_availability:
@@ -292,7 +298,8 @@ Error details: {model_availability.get('error', 'Unknown error')}
             "load_time_sec": load_time,
             "inputs": [input_desc.name for input_desc in spec.description.input],
             "outputs": [output_desc.name for output_desc in spec.description.output],
-            "size_mb": os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0
+            "size_mb": os.path.getsize(model_path) / (1024 * 1024) if os.path.exists(model_path) else 0,
+            "memory_saving_mode": memory_saving_mode
         }
         
         logger.info(f"Model loaded successfully in {load_time:.2f} seconds")

@@ -28,8 +28,11 @@ def detect_environment() -> Dict[str, Any]:
     is_in_docker = os.path.exists("/.dockerenv")
     
     # If on Render Free Tier, prefer /tmp/model path since it's most reliable
+    # and set a flag to avoid multiple model copies
     if is_on_render:
         os.environ["MODEL_DATA_PATH"] = "/tmp/model"
+        os.environ["RENDER_FREE_TIER"] = "true"
+        os.environ["MINIMIZE_MEMORY_USAGE"] = "true"
     
     env_info = {
         "environment": os.environ.get("ENVIRONMENT", "development"),
@@ -42,6 +45,7 @@ def detect_environment() -> Dict[str, Any]:
         "parent_dir": os.path.dirname(os.getcwd()),
         "user": os.environ.get("USER", "unknown"),
         "hostname": os.environ.get("HOSTNAME", "unknown"),
+        "minimize_memory": os.environ.get("MINIMIZE_MEMORY_USAGE") == "true"
     }
     
     # Add minimal Render-specific information for diagnostics
@@ -53,7 +57,7 @@ def detect_environment() -> Dict[str, Any]:
 def create_directories() -> Dict[str, bool]:
     """
     Create necessary directories for the application.
-    Free Tier compatible version that prioritizes /tmp/model directory.
+    Memory-efficient version that prioritizes /tmp/model directory.
     
     Returns:
         Dict with directory creation results
@@ -62,42 +66,46 @@ def create_directories() -> Dict[str, bool]:
     
     # Get environment info
     env_info = detect_environment()
+    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
     
-    # For Render Free Tier, prioritize the /tmp/model directory
-    if env_info["on_render"]:
-        logger.info("Rendering Free Tier detected - prioritizing /tmp/model")
-        # Always set MODEL_DATA_PATH to /tmp/model on Render Free Tier
+    # For Render Free Tier or memory-saving mode, only create /tmp/model
+    if env_info["on_render"] or minimize_memory:
+        logger.info("Memory-saving mode active - only creating essential directories")
+        # Always set MODEL_DATA_PATH to /tmp/model
         os.environ["MODEL_DATA_PATH"] = "/tmp/model"
-    
-    # Define directories to create
-    directories = [
-        # Temp directory (high priority for Free Tier)
-        "/tmp/model",
         
-        # App-specific directories
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"),
+        # Only create /tmp/model in memory-saving mode
+        directories = ["/tmp/model"]
+    else:
+        # Standard mode - create multiple directories
+        directories = [
+            # Temp directory
+            "/tmp/model",
+            
+            # App-specific directories
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"),
+            
+            # Check if MODEL_DATA_PATH is set and different from /tmp/model
+            env_info.get("model_data_path") if env_info.get("model_data_path") != "/tmp/model" else None
+        ]
         
-        # Check if MODEL_DATA_PATH is set and different from /tmp/model
-        env_info.get("model_data_path") if env_info.get("model_data_path") != "/tmp/model" else None
-    ]
-    
-    # Add basic Render paths (avoid persistent disk paths for Free Tier)
-    if env_info["on_render"]:
-        render_dirs = [
-            # Current directory models
-            os.path.join(os.getcwd(), "backend", "app", "model"),
-            os.path.join(os.getcwd(), "backend"),
-            # Standard Render paths
-            "/opt/render/project/src/backend/app/model"
-        ]
-        directories.extend(render_dirs)
-    
-    if env_info["in_docker"]:
-        docker_dirs = [
-            "/app/app/model",
-            "/app/backend/app/model"
-        ]
-        directories.extend(docker_dirs)
+        # Add basic Render paths
+        if env_info["on_render"]:
+            render_dirs = [
+                # Current directory models
+                os.path.join(os.getcwd(), "backend", "app", "model"),
+                os.path.join(os.getcwd(), "backend"),
+                # Standard Render paths
+                "/opt/render/project/src/backend/app/model"
+            ]
+            directories.extend(render_dirs)
+        
+        if env_info["in_docker"]:
+            docker_dirs = [
+                "/app/app/model",
+                "/app/backend/app/model"
+            ]
+            directories.extend(docker_dirs)
     
     # Remove duplicates and None values
     directories = [d for d in directories if d]
@@ -163,7 +171,7 @@ def download_model_from_dropbox(
 ) -> Dict[str, Any]:
     """
     Download the model file directly from Dropbox.
-    Free Tier compatible version that prioritizes /tmp/model.
+    Memory-efficient version that prioritizes /tmp/model and avoids redundant copies.
     
     Args:
         dropbox_link: Dropbox direct download link
@@ -177,28 +185,24 @@ def download_model_from_dropbox(
     
     # Get environment info
     env_info = detect_environment()
+    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
     
-    # Determine output path if not provided (prioritize /tmp/model for Free Tier)
-    if not output_path:
-        if env_info["on_render"]:
-            # Always use /tmp/model on Render Free Tier
-            output_path = "/tmp/model/BERTSQUADFP16.mlmodel"
-            logger.info("Render Free Tier detected - downloading to /tmp/model")
+    # For Render Free Tier or memory-saving mode, always use /tmp/model
+    if env_info["on_render"] or minimize_memory:
+        output_path = "/tmp/model/BERTSQUADFP16.mlmodel"
+        logger.info("Memory-saving mode active - downloading directly to /tmp/model")
+    elif not output_path:
+        # Use MODEL_DATA_PATH if set
+        model_data_path = os.environ.get('MODEL_DATA_PATH')
+        if model_data_path:
+            output_path = os.path.join(model_data_path, "BERTSQUADFP16.mlmodel")
         else:
-            # Use MODEL_DATA_PATH if set
-            model_data_path = os.environ.get('MODEL_DATA_PATH')
-            if model_data_path:
-                output_path = os.path.join(model_data_path, "BERTSQUADFP16.mlmodel")
-            else:
-                # Use app/model directory as fallback
-                app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                output_path = os.path.join(app_dir, "model", "BERTSQUADFP16.mlmodel")
+            # Use app/model directory as fallback
+            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            output_path = os.path.join(app_dir, "model", "BERTSQUADFP16.mlmodel")
     
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
-    # Make sure /tmp/model exists as well (for redundancy)
-    os.makedirs("/tmp/model", exist_ok=True)
     
     # Track time for the operation
     start_time = time.time()
@@ -232,39 +236,23 @@ def download_model_from_dropbox(
         # Verify the file was downloaded successfully
         download_succeeded = os.path.exists(output_path)
         
-        # For Free Tier compatibility, always create a copy in /tmp/model
-        if download_succeeded and output_path != "/tmp/model/BERTSQUADFP16.mlmodel":
-            try:
-                tmp_path = "/tmp/model/BERTSQUADFP16.mlmodel"
-                logger.info(f"Creating Free Tier copy in {tmp_path}")
-                shutil.copy2(output_path, tmp_path)
-            except Exception as e:
-                logger.warning(f"Failed to create Free Tier copy in /tmp/model: {str(e)}")
-        
         if download_succeeded:
             file_size = os.path.getsize(output_path)
             logger.info(f"Downloaded {file_size/(1024*1024):.2f} MB in {time.time() - start_time:.1f} seconds")
             
-            # Copy to all key locations and check for redundancy
+            # In memory-saving mode, don't create redundant copies
             copied_locations = []
             
-            # Copy to important locations manually for Free Tier compatibility
-            key_locations = [
-                "/tmp/model/BERTSQUADFP16.mlmodel",  # Free Tier primary location
-                os.path.join(os.getcwd(), "backend/app/model/BERTSQUADFP16.mlmodel")  # Local directory
-            ]
-            
-            # Try copying to each location
-            for loc in key_locations:
-                if loc != output_path:
-                    try:
-                        dirname = os.path.dirname(loc)
-                        os.makedirs(dirname, exist_ok=True)
-                        shutil.copy2(output_path, loc)
-                        copied_locations.append(loc)
-                        logger.info(f"Created redundant copy at {loc}")
-                    except Exception as e:
-                        logger.warning(f"Could not copy to {loc}: {str(e)}")
+            # Only create a copy in /tmp/model if we're not already there and not in memory-saving mode
+            if not (env_info["on_render"] or minimize_memory) and output_path != "/tmp/model/BERTSQUADFP16.mlmodel":
+                try:
+                    tmp_path = "/tmp/model/BERTSQUADFP16.mlmodel"
+                    logger.info(f"Creating copy in {tmp_path}")
+                    os.makedirs("/tmp/model", exist_ok=True)
+                    shutil.copy2(output_path, tmp_path)
+                    copied_locations.append(tmp_path)
+                except Exception as e:
+                    logger.warning(f"Failed to create copy in /tmp/model: {str(e)}")
             
             # Return success with copied locations
             return {
@@ -273,7 +261,7 @@ def download_model_from_dropbox(
                 "size_mb": file_size / (1024 * 1024),
                 "download_time_sec": time.time() - start_time,
                 "copies": copied_locations,
-                "free_tier_compatible": "/tmp/model/BERTSQUADFP16.mlmodel" in copied_locations
+                "memory_saving_mode": env_info["on_render"] or minimize_memory
             }
         else:
             return {
@@ -295,6 +283,7 @@ def download_model_from_dropbox(
 def initialize_app() -> Dict[str, Any]:
     """
     Initialize the application.
+    Memory-efficient version that minimizes redundant operations.
     
     Returns:
         Dict with initialization status information
@@ -304,9 +293,13 @@ def initialize_app() -> Dict[str, Any]:
     
     # 1. Detect environment
     env_info = detect_environment()
+    minimize_memory = os.environ.get('MINIMIZE_MEMORY_USAGE') == 'true'
     logger.info(f"Detected environment: {env_info['environment']}")
     
-    # 2. Create directories
+    if env_info["on_render"] or minimize_memory:
+        logger.info("Memory-saving mode active - optimizing for minimal memory usage")
+    
+    # 2. Create directories (will be minimal in memory-saving mode)
     dir_results = create_directories()
     
     # 3. Check model availability
@@ -327,11 +320,16 @@ def initialize_app() -> Dict[str, Any]:
         "model": model_check,
         "download": download_result,
         "initialization_time_sec": time.time() - start_time,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "memory_saving_mode": env_info["on_render"] or minimize_memory
     }
     
     # Log initialization result summary
     logger.info(f"Application initialization completed in {init_result['initialization_time_sec']:.2f} seconds")
     logger.info(f"Model found: {model_check['found']} at {model_check['path']}")
+    
+    if env_info["on_render"] or minimize_memory:
+        logger.info("Memory-saving mode: Using /tmp/model as primary storage location")
+        logger.info("Memory-saving mode: Minimizing redundant model copies")
     
     return init_result
