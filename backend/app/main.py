@@ -76,49 +76,59 @@ def load_model(force_reload=False):
     # Check if model file exists
     model_status["exists"] = os.path.exists(MODEL_PATH)
     
-    # If model doesn't exist, try to download it
+    # If model doesn't exist, show clear error message
     if not model_status["exists"]:
-        logger.warning(f"Model not found at {MODEL_PATH}. Attempting to download...")
-        
-        # Add the parent directory to sys.path to import download_model
+        error_msg = f"""
+=================================================================
+ERROR: CoreML model file not found at {MODEL_PATH}
+=================================================================
+The model file should be placed at the location above.
+
+This model file should be stored using Git LFS in the repository.
+If you're not seeing the file, make sure:
+
+1. You have Git LFS installed: https://git-lfs.github.com
+2. You've pulled the repository with Git LFS enabled:
+   git lfs pull
+
+If you have the model file separately, copy it to the path above.
+=================================================================
+"""
+        logger.error(error_msg)
+        model_status["last_error"] = f"Model file not found at {MODEL_PATH}. Please ensure the CoreML model is properly installed."
+        return False
+    
+    # Model file exists, verify it using check_model
+    try:
+        # Add the parent directory to sys.path to import check_model
         parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if parent_dir not in sys.path:
             sys.path.append(parent_dir)
-        
-        try:
-            # Import the download_model function
-            from download_model import download_model
             
-            # Try to download the model
-            logger.info("Starting model download...")
-            if not download_model():
-                error_msg = "Failed to download model"
-                logger.error(error_msg)
-                model_status["last_error"] = error_msg
-                return False
-            
-            # Update model existence status after download
-            model_status["exists"] = os.path.exists(MODEL_PATH)
-            if not model_status["exists"]:
-                error_msg = "Model download reported success but file doesn't exist"
-                logger.error(error_msg)
-                model_status["last_error"] = error_msg
-                return False
-                
-            logger.info("Model downloaded successfully, now loading...")
+        from download_model import check_model
         
-        except ImportError as e:
-            error_msg = f"Could not import download_model module: {str(e)}"
+        # Check if the model is valid
+        logger.info(f"Verifying model at {MODEL_PATH}...")
+        if not check_model():
+            error_msg = "Model verification failed. The model file exists but may be corrupted."
             logger.error(error_msg)
             model_status["last_error"] = error_msg
             return False
-        
-        except Exception as e:
-            error_msg = f"Unexpected error during model download: {str(e)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
-            model_status["last_error"] = error_msg
-            return False
+            
+        logger.info("Model verification successful, now loading...")
+    
+    except ImportError as e:
+        error_msg = f"Could not import model verification module: {str(e)}"
+        logger.error(error_msg)
+        model_status["last_error"] = error_msg
+        return False
+    
+    except Exception as e:
+        error_msg = f"Unexpected error during model verification: {str(e)}"
+        logger.error(error_msg)
+        logger.error(traceback.format_exc())
+        model_status["last_error"] = error_msg
+        return False
     
     # Load the ML model
     try:
